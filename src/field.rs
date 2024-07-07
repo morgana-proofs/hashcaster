@@ -1,5 +1,5 @@
 use std::{mem::transmute, ops::{Add, AddAssign, BitAnd, BitAndAssign, Mul, MulAssign}};
-use crate::{utils::{u128_rand, u128_to_bits}, precompute::frobenius_table::FROBENIUS, precompute::u8_mult_table::MULT_TABLE};
+use crate::{precompute::{cobasis_frobenius_table::COBASIS_FROBENIUS, cobasis_table::COBASIS, frobenius_table::FROBENIUS, u8_mult_table::MULT_TABLE}, utils::{u128_rand, u128_to_bits}};
 use num_traits::{One, Zero};
 use rand::Rng;
 
@@ -35,6 +35,15 @@ impl F128 {
             if vec_bits[i] {ret ^= matrix[i]}
         }
         F128::new(ret)
+    }
+
+    pub fn basis(i: usize) -> Self {
+        assert!(i < 128);
+        Self::new(1 << i)
+    }
+
+    pub fn cobasis(i: usize) -> Self {
+        Self::new(COBASIS[i])
     }
 }
 
@@ -233,6 +242,16 @@ pub fn m8_l(v1: u8, v2: u8, loglength: usize) -> u8 {
     ((h1h2_reduce ^ z3 ^ q) << (len / 2)) + q
 }
 
+// Computes \sum_j COBASIS[i]^{2^j} twists[j] 
+pub fn pi(i: usize, twists: &[F128]) -> F128 {
+    assert!(twists.len() == 128);
+    let mut ret = F128::zero();
+    for j in 0..128 {
+        ret += F128::new(COBASIS_FROBENIUS[j][i]) * twists[j];
+    }
+    ret
+}
+
 
 #[cfg(test)]
 mod tests {
@@ -302,6 +321,26 @@ mod tests {
     }
 
     #[test]
+    fn precompute_cobasis_frobenius() {
+        let path = Path::new("cobasis_frobenius_table.txt");
+        if path.is_file() {return};
+        let mut file = File::create(path).unwrap();
+        let mut cobasis = Matrix::new(COBASIS.to_vec());
+        let mut ret = Vec::with_capacity(128);
+        for _ in 0..128 {
+            ret.push(cobasis.cols.clone());
+            for j in 0..128 {
+                let x = F128::new(cobasis.cols[j]);
+                cobasis.cols[j] = (x * x).raw();
+            }
+        }
+        file.write_all("pub const FROBENIUS : [[u128; 128]; 128] =\n".as_bytes()).unwrap();
+        file.write_all(format!("{:?}", ret).as_bytes()).unwrap();
+        file.write_all(";".as_bytes()).unwrap();
+
+    }
+
+    #[test]
     fn precompute_cobasis() {
         let path = Path::new("cobasis_table.txt");
         if path.is_file() {return};
@@ -310,8 +349,8 @@ mod tests {
         for i in 0..128 {
             // compute pi_i linear function
             for j in 0..128 {
-                let b_j = F128::new(1 << j);
-                let b_i = F128::new(1 << i);
+                let b_j = F128::basis(j);
+                let b_i = F128::basis(i);
                 let mut x = b_j * b_i;
 
                 for k in 0..7 {
@@ -410,19 +449,11 @@ mod tests {
         }
         let mut answer = F128::zero();
         for i in 0..128 {
-            let r = F128::new(COBASIS[i]);
-            let mut _r = r;
-            let mut r_orbit = vec![]; // in practice, these can be precomputed
-            for _ in 0..128 {
-                r_orbit.push(_r);
-                _r *= _r;
-            }
-            let pi_i_a = a_orbit.iter().zip(r_orbit.iter()).fold(F128::zero(), |acc, (x, y)| acc + *x * y);
-            let pi_i_b = b_orbit.iter().zip(r_orbit.iter()).fold(F128::zero(), |acc, (x, y)| acc + *x * y);
-            answer += F128::new(1 << i) * pi_i_a * pi_i_b;
+            let pi_i_a = pi(i, &a_orbit);
+            let pi_i_b = pi(i, &b_orbit);
+            answer += F128::basis(i) * pi_i_a * pi_i_b;
         }
         let expected_answer = a & b;
         assert_eq!(answer, expected_answer);
     }
-
 }
