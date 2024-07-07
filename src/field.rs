@@ -1,5 +1,5 @@
 use std::{mem::transmute, ops::{Add, AddAssign, BitAnd, BitAndAssign, Mul, MulAssign}};
-use crate::u8_mult_table::MULT_TABLE;
+use crate::{utils::{u128_rand, u128_to_bits}, precompute::frobenius_table::FROBENIUS, precompute::u8_mult_table::MULT_TABLE};
 use num_traits::{One, Zero};
 use rand::Rng;
 
@@ -22,9 +22,19 @@ impl F128 {
     }
 
     pub fn rand<RNG: Rng>(rng: &mut RNG) -> Self {
-        let a = rng.next_u64();
-        let b = rng.next_u64();
-        Self::new(unsafe{transmute::<(u64, u64), u128>((a, b))})
+        Self::new(u128_rand(rng))
+    }
+
+    /// This function is not efficient for small k-s.
+    pub fn frob(&self, mut k: usize) -> Self {
+        k = k % 128;
+        let matrix = &FROBENIUS[k]; 
+        let mut ret = 0; // This is matrix application, I avoid using apply to not allocate a new vector.
+        let vec_bits = u128_to_bits(self.raw());
+        for i in 0..128 {
+            if vec_bits[i] {ret ^= matrix[i]}
+        }
+        F128::new(ret)
     }
 }
 
@@ -135,7 +145,7 @@ pub fn m128(v1: u128, v2: u128) -> u128 {
     let l1l2 = m64(l1, l2);
     let h1h2 = m64(h1, h2);
 
-    let h1h2_reduce = m64(1 << 32, h1h2);
+    let h1h2_reduce = m64(1 << 32, h1h2); // TODO: OPTIMIZE THIS
 
     let z3 = m64(l1 ^ h1, l2 ^ h2);
 
@@ -226,8 +236,10 @@ pub fn m8_l(v1: u8, v2: u8, loglength: usize) -> u8 {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs::File, io::Write, process::exit};
+    use std::{fs::File, io::Write, path::Path};
     use rand::rngs::OsRng;
+
+    use crate::{precompute::cobasis_table::COBASIS, utils::{Matrix, _u128_from_bits}};
 
     use super::*;
     #[test]
@@ -255,7 +267,9 @@ mod tests {
 
     #[test]
     fn precompute_m8() {
-        let mut file = File::create("precomp.txt").unwrap_or_else(|_|{exit(1)});
+        let path = Path::new("u8_mult_table.txt");
+        if path.is_file() {return};
+        let mut file = File::create(path).unwrap();
         let mut vals: Vec<Vec<u8>> = vec![vec![0; 256]; 256];
         for a in 0..256 {
             for b in 0..256 {
@@ -264,6 +278,61 @@ mod tests {
         }
         let ret = format!("{:?}", vals);
         file.write_all(ret.as_bytes()).unwrap();
+    }
+
+    #[test]
+    fn precompute_frobenius() {
+        let path = Path::new("frobenius_table.txt");
+        if path.is_file() {return};
+        let mut file = File::create(path).unwrap();
+        let mut basis = Matrix::diag();
+        let mut ret = Vec::with_capacity(128);
+        for _ in 0..128 {
+            ret.push(basis.cols.clone());
+            for j in 0..128 {
+                let x = F128::new(basis.cols[j]);
+                basis.cols[j] = (x * x).raw();
+            }
+        }
+        assert_eq!(basis, Matrix::diag());
+
+        file.write_all("pub const FROBENIUS : [[u128; 128]; 128] =\n".as_bytes()).unwrap();
+        file.write_all(format!("{:?}", ret).as_bytes()).unwrap();
+        file.write_all(";".as_bytes()).unwrap();
+    }
+
+    #[test]
+    fn precompute_cobasis() {
+        let path = Path::new("cobasis_table.txt");
+        if path.is_file() {return};
+        let mut file = File::create(path).unwrap();
+        let mut matrix = vec![vec![false; 128]; 128];        
+        for i in 0..128 {
+            // compute pi_i linear function
+            for j in 0..128 {
+                let b_j = F128::new(1 << j);
+                let b_i = F128::new(1 << i);
+                let mut x = b_j * b_i;
+
+                for k in 0..7 {
+                    x = x.frob(1 << (6-k)) + x;
+                }
+
+                 match x.raw() {
+                    0 => (),
+                    1 => {
+                        matrix[i][j] = true;
+                    }
+                    _ => panic!(),
+                }
+            }
+        }
+        let matrix = matrix.iter().map(|v| _u128_from_bits(v)).collect();
+        let matrix = Matrix::new(matrix);
+        let ret = matrix.inverse().unwrap().cols;
+        file.write_all("pub const COBASIS : [u128; 128] =\n".as_bytes()).unwrap();
+        file.write_all(format!("{:?}", ret).as_bytes()).unwrap();
+        file.write_all(";".as_bytes()).unwrap();
     }
 
     #[test]
@@ -293,13 +362,67 @@ mod tests {
         assert_eq!(a, x);
     }
 
-
     #[test]
-    fn frob_basis() {
+    fn frobenius() {
+        let rng = &mut OsRng;
+        let a = F128::rand(rng);
+        let mut apow = a;
         for i in 0..128 {
-            let ai = F128::new(1 << i);
-            let bi = ai * ai;
-            println!("{:#0128b}", bi.raw());
+            assert_eq!(a.frob(i), apow);
+            apow *= apow;
         }
     }
+
+    #[test]
+    fn linear_pi_formula() {
+        let rng = &mut OsRng;
+        for _ in 0..100{
+            let a = F128::rand(rng);
+            let mut pi = a;
+            let mut af = vec![];
+            let mut _a = a;
+            for _ in 0..128 {
+                af.push(_a);
+                _a *= _a;
+            }
+            for k in 0..7 {
+                pi = pi.frob(1 << (6-k)) + pi;
+            }
+            let pi_2 = af.iter().fold(F128::zero(), |a, b| a + b);
+            assert_eq!(pi, pi_2)
+        }
+    }
+
+    #[test]
+    fn twists_logic_and() {
+        let rng = &mut OsRng;
+        let a = F128::rand(rng);
+        let b = F128::rand(rng);
+        let mut _a = a;
+        let mut _b = b;
+        let mut a_orbit = vec![];
+        let mut b_orbit = vec![];
+        for _ in 0..128 {
+            a_orbit.push(_a);
+            b_orbit.push(_b);
+            _a *= _a;
+            _b *= _b;
+        }
+        let mut answer = F128::zero();
+        for i in 0..128 {
+            let r = F128::new(COBASIS[i]);
+            let mut _r = r;
+            let mut r_orbit = vec![]; // in practice, these can be precomputed
+            for _ in 0..128 {
+                r_orbit.push(_r);
+                _r *= _r;
+            }
+            let pi_i_a = a_orbit.iter().zip(r_orbit.iter()).fold(F128::zero(), |acc, (x, y)| acc + *x * y);
+            let pi_i_b = b_orbit.iter().zip(r_orbit.iter()).fold(F128::zero(), |acc, (x, y)| acc + *x * y);
+            answer += F128::new(1 << i) * pi_i_a * pi_i_b;
+        }
+        let expected_answer = a & b;
+        assert_eq!(answer, expected_answer);
+    }
+
 }

@@ -1,2 +1,3 @@
 pub mod field;
-pub mod u8_mult_table;
+pub mod utils;
+pub mod precompute;
