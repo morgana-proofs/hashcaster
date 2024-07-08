@@ -26,9 +26,16 @@ impl F128 {
     }
 
     /// This function is not efficient for small k-s.
-    pub fn frob(&self, mut k: usize) -> Self {
-        k = k % 128;
-        let matrix = &FROBENIUS[k]; 
+    pub fn frob(&self, mut k: i32) -> Self {
+        if k < 0 {
+            k *= -1;
+            k %= 128;
+            k *= -1;
+            k += 128;
+        } else {
+            k %= 128
+        }
+        let matrix = &FROBENIUS[k as usize]; 
         let mut ret = 0; // This is matrix application, I avoid using apply to not allocate a new vector.
         let vec_bits = u128_to_bits(self.raw());
         for i in 0..128 {
