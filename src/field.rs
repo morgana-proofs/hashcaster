@@ -1,5 +1,5 @@
 use std::{mem::transmute, ops::{Add, AddAssign, BitAnd, BitAndAssign, Mul, MulAssign}};
-use crate::{precompute::{cobasis_frobenius_table::COBASIS_FROBENIUS, cobasis_table::COBASIS, frobenius_table::FROBENIUS, u8_mult_table::MULT_TABLE}, utils::{u128_rand, u128_to_bits}};
+use crate::{backend::clmul::alt_mul, precompute::{cobasis_frobenius_table::COBASIS_FROBENIUS, cobasis_table::COBASIS, frobenius_table::FROBENIUS}, utils::{u128_rand, u128_to_bits}};
 use num_traits::{One, Zero};
 use rand::Rng;
 
@@ -9,7 +9,11 @@ pub struct F128 {
 }
 
 impl F128 {
-    pub fn new(raw: u128) -> Self {
+    pub fn new(x: bool) -> Self {
+        if x {Self::one()} else {Self::zero()}
+    }
+
+    pub fn from_raw(raw: u128) -> Self {
         Self{raw}
     }
 
@@ -22,10 +26,10 @@ impl F128 {
     }
 
     pub fn rand<RNG: Rng>(rng: &mut RNG) -> Self {
-        Self::new(u128_rand(rng))
+        Self::from_raw(u128_rand(rng))
     }
 
-    /// This function is not efficient for small k-s.
+    /// This function is not efficient.
     pub fn frob(&self, mut k: i32) -> Self {
         if k < 0 {
             k *= -1;
@@ -36,21 +40,21 @@ impl F128 {
             k %= 128
         }
         let matrix = &FROBENIUS[k as usize]; 
-        let mut ret = 0; // This is matrix application, I avoid using apply to not allocate a new vector.
+        let mut ret = 0;
         let vec_bits = u128_to_bits(self.raw());
         for i in 0..128 {
             if vec_bits[i] {ret ^= matrix[i]}
         }
-        F128::new(ret)
+        F128::from_raw(ret)
     }
 
     pub fn basis(i: usize) -> Self {
         assert!(i < 128);
-        Self::new(1 << i)
+        Self::from_raw(1 << i)
     }
 
     pub fn cobasis(i: usize) -> Self {
-        Self::new(COBASIS[i])
+        Self::from_raw(COBASIS[i])
     }
 }
 
@@ -66,7 +70,7 @@ impl Zero for F128 {
 
 impl One for F128 {
     fn one() -> Self {
-        Self{raw: 1}
+        Self{raw: 257870231182273679343338569694386847745}
     }
 }
 
@@ -130,7 +134,7 @@ impl Mul<F128> for F128 {
     type Output = F128;
 
     fn mul(self, rhs: F128) -> Self::Output {
-        Self::new(m128(self.into_raw(), rhs.into_raw()))
+        Self::from_raw(alt_mul(self.raw, rhs.raw))
     }
 }
 
@@ -138,7 +142,7 @@ impl Mul<&F128> for F128 {
     type Output = F128;
 
     fn mul(self, rhs: &F128) -> Self::Output {
-        Self::new(m128(self.into_raw(), rhs.raw()))
+        Self::from_raw(alt_mul(self.into_raw(), rhs.raw()))
     }
 }
 
@@ -154,111 +158,15 @@ impl MulAssign<&F128> for F128 {
     }
 }
 
-pub fn m128(v1: u128, v2: u128) -> u128 {
-    let (l1, h1) = unsafe{transmute::<u128, (u64, u64)>(v1)};
-    let (l2, h2) = unsafe{transmute::<u128, (u64, u64)>(v2)};
-
-    let l1l2 = m64(l1, l2);
-    let h1h2 = m64(h1, h2);
-
-    let h1h2_reduce = m64(1 << 32, h1h2); // TODO: OPTIMIZE THIS
-
-    let z3 = m64(l1 ^ h1, l2 ^ h2);
-
-    let q = l1l2 ^ h1h2;
-    unsafe{transmute::<(u64, u64), u128>((q, h1h2_reduce ^ z3 ^ q))}
-}
-
-pub fn m64(v1: u64, v2: u64) -> u64 {
-    let (l1, h1) = unsafe{transmute::<u64, (u32, u32)>(v1)};
-    let (l2, h2) = unsafe{transmute::<u64, (u32, u32)>(v2)};
-
-    let l1l2 = m32(l1, l2);
-    let h1h2 = m32(h1, h2);
-
-    let h1h2_reduce = m32(1 << 16, h1h2);
-
-    let z3 = m32(l1 ^ h1, l2 ^ h2);
-
-    let q = l1l2 ^ h1h2;
-    unsafe{transmute::<(u32, u32), u64>((q, h1h2_reduce ^ z3 ^ q))}
-}
-
-pub fn m32(v1: u32, v2: u32) -> u32 {
-    let (l1, h1) = unsafe{transmute::<u32, (u16, u16)>(v1)};
-    let (l2, h2) = unsafe{transmute::<u32, (u16, u16)>(v2)};
-
-    let l1l2 = m16(l1, l2);
-    let h1h2 = m16(h1, h2);
-
-    let h1h2_reduce = m16(1 << 8, h1h2);
-
-    let z3 = m16(l1 ^ h1, l2 ^ h2);
-
-    let q = l1l2 ^ h1h2;
-    unsafe{transmute::<(u16, u16), u32>((q, h1h2_reduce ^ z3 ^ q))}
-}
-
-pub fn m16(v1: u16, v2: u16) -> u16 {
-
-    let (l1, h1) = unsafe{transmute::<u16, (u8, u8)>(v1)};
-    let (l2, h2) = unsafe{transmute::<u16, (u8, u8)>(v2)};
-
-    let l1l2 = m8(l1, l2);
-    let h1h2 = m8(h1, h2);
-
-    let h1h2_reduce = m8(1 << 4, h1h2);
-
-    let z3 = m8(l1 ^ h1, l2 ^ h2);
-
-    let q = l1l2 ^ h1h2;
-    unsafe{transmute::<(u8, u8), u16>((q, h1h2_reduce ^ z3 ^ q))}
-}
-
-pub fn m8(v1: u8, v2: u8) -> u8 {
-    MULT_TABLE[v1 as usize][v2 as usize]
-}
-
-/// This is only used for precomputations, so it is fine if it is not very optimal.
-pub fn m8_l(v1: u8, v2: u8, loglength: usize) -> u8 {
-        
-    assert!(loglength <= 3);
-    let len = 1 << loglength;
-    if len < 8 {
-        assert!(v1 >> len == 0);
-        assert!(v2 >> len == 0);
-    }
-    if len == 1 {
-        return v1 * v2;
-    }
-
-    let h1 = v1 >> (len / 2);
-    let l1 = v1 - (h1 << (len / 2));
-    let h2 = v2 >> (len / 2);
-    let l2 = v2 - (h2 << (len / 2));
-
-    let l1l2 = m8_l(l1, l2, loglength - 1);
-    let h1h2 = m8_l(h1, h2, loglength - 1);
-
-    let h1h2_reduce = m8_l(1 << (len / 4), h1h2, loglength - 1);
-
-    let z3 = m8_l(l1 ^ h1, l2 ^ h2, loglength - 1);
-
-    let q = l1l2 ^ h1h2;
-
-    ((h1h2_reduce ^ z3 ^ q) << (len / 2)) + q
-}
-
 // Computes \sum_j COBASIS[i]^{2^j} twists[j] 
 pub fn pi(i: usize, twists: &[F128]) -> F128 {
     assert!(twists.len() == 128);
     let mut ret = F128::zero();
     for j in 0..128 {
-        ret += F128::new(COBASIS_FROBENIUS[j][i]) * twists[j];
+        ret += F128::from_raw(COBASIS_FROBENIUS[j][i]) * twists[j];
     }
     ret
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -268,43 +176,6 @@ mod tests {
     use crate::{precompute::cobasis_table::COBASIS, utils::{Matrix, _u128_from_bits}};
 
     use super::*;
-    #[test]
-    fn m8_assoc() {
-        let mut vals: Vec<Vec<u8>> = vec![vec![0; 256]; 256];
-        for a in 0..256 {
-            for b in 0..256 {
-                vals[a][b] = m8(a as u8,b as u8);
-            }
-        }
-
-        for a in 0..256 {
-            for b in 0..256 {
-                for c in 0..256 {
-                    assert!(vals[vals[a][b] as usize][c] == vals[a][vals[b][c] as usize])
-                }
-            }
-        }
-
-        for a in 0..256 {
-            assert!(vals[a][0] == 0);
-            assert!(vals[a][1] == a as u8);
-        }
-    }
-
-    #[test]
-    fn precompute_m8() {
-        let path = Path::new("u8_mult_table.txt");
-        if path.is_file() {return};
-        let mut file = File::create(path).unwrap();
-        let mut vals: Vec<Vec<u8>> = vec![vec![0; 256]; 256];
-        for a in 0..256 {
-            for b in 0..256 {
-                vals[a][b] = m8_l(a as u8,b as u8, 3);
-            }
-        }
-        let ret = format!("{:?}", vals);
-        file.write_all(ret.as_bytes()).unwrap();
-    }
 
     #[test]
     fn precompute_frobenius() {
@@ -316,7 +187,7 @@ mod tests {
         for _ in 0..128 {
             ret.push(basis.cols.clone());
             for j in 0..128 {
-                let x = F128::new(basis.cols[j]);
+                let x = F128::from_raw(basis.cols[j]);
                 basis.cols[j] = (x * x).raw();
             }
         }
@@ -337,11 +208,11 @@ mod tests {
         for _ in 0..128 {
             ret.push(cobasis.cols.clone());
             for j in 0..128 {
-                let x = F128::new(cobasis.cols[j]);
+                let x = F128::from_raw(cobasis.cols[j]);
                 cobasis.cols[j] = (x * x).raw();
             }
         }
-        file.write_all("pub const FROBENIUS : [[u128; 128]; 128] =\n".as_bytes()).unwrap();
+        file.write_all("pub const COBASIS_FROBENIUS : [[u128; 128]; 128] =\n".as_bytes()).unwrap();
         file.write_all(format!("{:?}", ret).as_bytes()).unwrap();
         file.write_all(";".as_bytes()).unwrap();
 
@@ -360,17 +231,17 @@ mod tests {
                 let b_i = F128::basis(i);
                 let mut x = b_j * b_i;
 
-                for k in 0..7 {
-                    x = x.frob(1 << (6-k)) + x;
+                let mut s = F128::zero();
+                for k in 0..128 {
+                    s += x;
+                    x *= x;
                 }
 
-                 match x.raw() {
-                    0 => (),
-                    1 => {
+                if s == F128::zero() {
+                } else if s == F128::one() {
                         matrix[i][j] = true;
-                    }
-                    _ => panic!(),
-                }
+                } else {panic!()}
+
             }
         }
         let matrix = matrix.iter().map(|v| _u128_from_bits(v)).collect();
@@ -388,7 +259,7 @@ mod tests {
         let b = F128::rand(rng);
         let c = F128::rand(rng);
 
-        let one = F128::new(1);
+        let one = F128::one();
 
         assert_eq!(a * one, a);
 
@@ -420,22 +291,27 @@ mod tests {
     }
 
     #[test]
-    fn linear_pi_formula() {
+    fn pi_as_expected() {
         let rng = &mut OsRng;
-        for _ in 0..100{
-            let a = F128::rand(rng);
-            let mut pi = a;
-            let mut af = vec![];
-            let mut _a = a;
-            for _ in 0..128 {
-                af.push(_a);
-                _a *= _a;
+        let mut r = F128::rand(rng);
+        let mut orbit = vec![];
+        for _ in 0..128 {
+            orbit.push(r);
+            r *= r;
+        }
+
+        for i in 0..128 {
+            let lhs;
+            let bit = pi(i, &orbit);
+            if bit == F128::zero() {
+                lhs = 0;
+            } else if bit == F128::one() {
+                lhs = 1;
+            } else {
+                panic!();
             }
-            for k in 0..7 {
-                pi = pi.frob(1 << (6-k)) + pi;
-            }
-            let pi_2 = af.iter().fold(F128::zero(), |a, b| a + b);
-            assert_eq!(pi, pi_2)
+            let rhs = (r.raw >> i) % 2;
+            assert!(lhs == rhs);
         }
     }
 

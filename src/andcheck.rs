@@ -481,7 +481,7 @@ mod tests {
         for i in 0..128 {
             poly_unzip.push(
                 poly.iter().map(|x|{
-                    F128::new((x.raw() >> i) % 2)
+                    F128::new((x.raw() >> i) % 2 == 1)
                 }).collect_vec()
             )
         }
