@@ -1,7 +1,7 @@
-use std::{mem::{transmute, MaybeUninit}, ops::Add};
+use std::{mem::{transmute, MaybeUninit}, time::Instant};
 
 use num_traits::{One, Zero};
-use crate::{field::{pi, F128}, utils::u128_to_bits};
+use crate::{field::{pi, F128}, parallelize::parallelize, utils::u128_to_bits};
 use itertools::Itertools;
 
 pub fn eq_poly(pt: &[F128]) -> Vec<F128> {
@@ -44,47 +44,61 @@ pub fn bits_to_trits(mut x: usize) -> usize {
 
 /// Makes table 3^{c+1} * 2^{dims - c - 1}
 pub fn extend_table(table: &[F128], dims: usize, c: usize) -> Vec<F128> {
-    // TODO: as we have tested that this is correct, we should replace options by maybeuninits
     // TODO: suggest adding parallelization only on 2^k layer, as this algo for extension doesn't work well in parallel
+    
     assert!(table.len() == 1 << dims);
     assert!(c < dims);
     let pow3 = 3usize.pow((c + 1) as u32);
     assert!(pow3 < (u16::MAX) as usize, "This is too large anyway ;)");
     let pow2 = 2usize.pow((dims - c - 1) as u32);
 
-    let mut ret = vec![None; pow3 * pow2];
+    let mut ret = vec![MaybeUninit::uninit(); pow3 * pow2];
     for i in 0..(1 << dims) {
         let hi = i >> (c + 1);
         let lo = i ^ (hi << (c + 1));
         let j = bits_to_trits(lo) + hi * pow3;
-        ret[j] = Some(table[i]);
+        ret[j] = MaybeUninit::new(table[i]);
     }
 
-    for i in 0..(pow2 as u32) {
-        for j in 0..(pow3 as u16) {
-            // actual index: j + i * pow3
-            let idx = (i as usize) * pow3 + j as usize;
-            
-            let mut counter = 0u32;
-            let mut head = j;
-            while head > 0 { // Search for the first trit = 2.
-                let trit = head % 3;
-                if trit == 2 {
-                    let offset = 3u16.pow(counter) as usize;
-                    assert!(ret[idx].is_none());
-                    ret[idx] = Some(ret[idx - offset].unwrap() + ret[idx - 2*offset].unwrap());// set it 0 and 1, add values
-                    break;
+    let mut task_size = pow3;
+    let mut d = 0;
+    while (task_size < pow3 * pow2) && (task_size < 500) {
+        task_size <<= 1;
+        d += 1;
+    }
+
+    parallelize(|chunk, i_offset| {
+        for q in 0 .. 1 << d {
+            for j in 0..(pow3 as u16) {
+                
+                //let i = (q as usize) + (i_offset >> d);
+                // actual index: j + i * pow3
+                let idx = (q as usize) * pow3 + j as usize;
+                
+                let mut counter = 0u32;
+                let mut head = j;
+                while head > 0 { // Search for the first trit = 2.
+                    let trit = head % 3;
+                    if trit == 2 {
+                        let offset = 3u16.pow(counter) as usize;
+                        unsafe{
+                            chunk[idx] = MaybeUninit::new(chunk[idx - offset].assume_init() + chunk[idx - 2*offset].assume_init());// set it 0 and 1, add values
+                        }
+                        break;
+                    }
+                    head /= 3;
+                    counter += 1;
                 }
-                head /= 3;
-                counter += 1;
-            }
-        };
-    }
-
-    ret.iter().map(|x|x.unwrap()).collect()
+            };
+        }    
+    },
+    &mut ret,
+    task_size,
+    );
+    unsafe{transmute::<Vec<MaybeUninit<F128>>, Vec<F128>>(ret)}
 }
 
-/// This function takes an F128-valued polynomial P, and computes restrictions of
+/// This function takes a F128-valued polynomial P, and computes restrictions of
 /// its F2-valued coordinates P_i = pi_i(P) - i.e. it returns 128 polynomials
 /// P_i(r0, ..., r_{j-1}, x_j, ..., x_{n-1})
 pub fn restrict(mut poly: Vec<F128>, coords: &[F128], dims: usize) -> Vec<Vec<F128>> {
@@ -167,11 +181,15 @@ impl AndcheckProver {
         }
 
         // Represent values in (0, 1, \infty)^{c+1} (0, 1)^{n-c-1}
-        // Replace options with maybeuninit when debugged.
         
+        let start = Instant::now();
         let p_ext = extend_table(&p, pt.len(), phase_switch);
         let q_ext = extend_table(&q, pt.len(), phase_switch);
         let p_q_ext = p_ext.iter().zip_eq(q_ext.iter()).map(|(a, b)| *a & *b).collect();
+
+        let end = Instant::now();
+
+        println!("AndcheckProver::new time {} ms", (end-start).as_millis());
 
         Self{
             pt,
@@ -417,7 +435,7 @@ impl AndcheckProver {
 
 #[cfg(test)]
 mod tests {
-    use std::iter::{repeat_with};
+    use std::{iter::repeat_with, time::Instant};
 
     use itertools::Itertools;
     use num_traits::Zero;
@@ -496,7 +514,7 @@ mod tests {
     #[test]
     fn verify_prover() {
         let rng = &mut OsRng;
-        let num_vars = 8;
+        let num_vars = 18;
 
         let pt : Vec<_> = repeat_with(|| F128::rand(rng)).take(num_vars).collect();
         let p : Vec<_> = repeat_with(|| F128::rand(rng)).take(1 << num_vars).collect();
@@ -506,17 +524,27 @@ mod tests {
         //let evaluation_claim = evaluate(&p_zip_q, &pt);
         let evaluation_claim = p_zip_q.iter().zip(eq_poly(&pt).iter()).fold(F128::zero(), |acc, (x, y)|acc + *x * *y);
 
-        let mut prover = AndcheckProver::new(pt, p, q, evaluation_claim, 5,true);
+        let start = Instant::now();
+
+        let mut prover = AndcheckProver::new(pt, p, q, evaluation_claim, 5,false);
 
         for i in 0..num_vars {
+            println!("Entering round {}, phase {}", i, if i <= 5 {1} else {2});
+            let start = Instant::now();
             let round_challenge = F128::rand(rng);
             prover.round(round_challenge);
+            let end = Instant::now();
+            println!("Round {} elapsed time {} ms", i, (end - start).as_millis());
         }
 
         assert!(
             prover.finish().apply_algebraic_combinator() * eq_ev(&prover.pt, &prover.challenges)
             ==
             prover.evaluation_claim
-        )
+        );
+
+        let end = Instant::now();
+
+        println!("Time elapsed: {}", (end - start).as_millis());
     }
 }
