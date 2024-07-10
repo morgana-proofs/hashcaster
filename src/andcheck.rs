@@ -1,6 +1,6 @@
 use std::{arch::x86_64::{__m128i, _mm_and_si128, _mm_movemask_epi8, _mm_shuffle_epi8, _mm_slli_epi64, _mm_xor_si128}, mem::{transmute, MaybeUninit}, time::Instant};
 
-use num_traits::{One, Zero};
+use num_traits::{One, Pow, Zero};
 use crate::{field::{pi, F128}, parallelize::parallelize, utils::u128_to_bits};
 use itertools::Itertools;
 
@@ -42,6 +42,63 @@ pub fn bits_to_trits(mut x: usize) -> usize {
     ret
 }
 
+
+fn compute_trit_mappings(c: usize)  -> (Vec<u16>, Vec<u16>) {
+    let pow3 = 3usize.pow((c+1) as u32);
+    
+    let mut trits = vec![0u8; c + 1];
+    let mut bits_mapping = vec![0u16; 1 << (c + 1)];
+    let mut trits_mapping = vec![0u16; pow3];
+    
+    let mut i = 0;
+    loop {
+        let mut bin_value = 0;
+        let mut j = c;
+        let mut flag = true;
+        let mut bad_offset = 1u16;
+        loop {
+            if flag {
+                bad_offset *= 3;
+            }
+            bin_value *= 2;
+            if trits[j] == 2 {
+                flag = false;
+            } else {
+                bin_value += trits[j] as usize;
+            }
+
+            if j == 0 {break}
+            j -= 1;
+        }
+        if flag {
+            bits_mapping[bin_value] = i as u16;
+        } else {
+            trits_mapping[i] = pow3 as u16 / bad_offset;
+        }
+
+        i += 1;
+        if i == pow3 {
+            break;
+        }
+        // add 1 to trits
+        // this would go out of bounds for (2, 2, 2, 2, ..., 2) but this never happens because we leave
+        // the main cycle before this
+        let mut j = 0;
+        loop {
+            if trits[j] < 2 {
+                trits[j] += 1;
+                break;
+            } else {
+                trits[j] = 0;
+                j += 1;
+            }
+        }
+    }
+
+    (bits_mapping, trits_mapping)
+}
+
+
 /// Makes table 3^{c+1} * 2^{dims - c - 1}
 pub fn extend_table(table: &[F128], dims: usize, c: usize) -> Vec<F128> {
     // TODO: suggest adding parallelization only on 2^k layer, as this algo for extension doesn't work well in parallel
@@ -52,11 +109,13 @@ pub fn extend_table(table: &[F128], dims: usize, c: usize) -> Vec<F128> {
     assert!(pow3 < (u16::MAX) as usize, "This is too large anyway ;)");
     let pow2 = 2usize.pow((dims - c - 1) as u32);
 
+    let (bits_mapping, trits_mapping) = compute_trit_mappings(c);
+
     let mut ret = vec![MaybeUninit::uninit(); pow3 * pow2];
     for i in 0..(1 << dims) {
         let hi = i >> (c + 1);
         let lo = i ^ (hi << (c + 1));
-        let j = bits_to_trits(lo) + hi * pow3;
+        let j = bits_mapping[lo] as usize + hi * pow3;
         ret[j] = MaybeUninit::new(table[i]);
     }
 
@@ -69,25 +128,16 @@ pub fn extend_table(table: &[F128], dims: usize, c: usize) -> Vec<F128> {
 
     parallelize(|chunk, i_offset| {
         for q in 0 .. 1 << d {
-            for j in 0..(pow3 as u16) {
-                
+            for j in 0..pow3 {
+                let offset = trits_mapping[j] as usize;
                 //let i = (q as usize) + (i_offset >> d);
                 // actual index: j + i * pow3
                 let idx = (q as usize) * pow3 + j as usize;
                 
-                let mut counter = 0u32;
-                let mut head = j;
-                while head > 0 { // Search for the first trit = 2.
-                    let trit = head % 3;
-                    if trit == 2 {
-                        let offset = 3u16.pow(counter) as usize;
-                        unsafe{
-                            chunk[idx] = MaybeUninit::new(chunk[idx - offset].assume_init() + chunk[idx - 2*offset].assume_init());// set it 0 and 1, add values
-                        }
-                        break;
+                if offset != 0 {
+                    unsafe{
+                        chunk[idx] = MaybeUninit::new(chunk[idx - offset].assume_init() + chunk[idx - 2*offset].assume_init());// set it 0 and 1, add values
                     }
-                    head /= 3;
-                    counter += 1;
                 }
             };
         }    
@@ -606,7 +656,7 @@ mod tests {
 
     use crate::{andcheck::{_by_coord_product_4_ru, by_coord_product_4_ru, by_coord_product_nobits, by_coord_product_nobranch, eq_ev}, field::F128, utils::u128_idx};
 
-    use super::{by_coord_product_naive, eq_poly, evaluate, extend_table, restrict, AndcheckProver};
+    use super::{by_coord_product_naive, compute_trit_mappings, eq_poly, evaluate, extend_table, restrict, AndcheckProver};
 
     #[test]
     fn test_eq_ev() {
@@ -632,6 +682,13 @@ mod tests {
                 assert!(ret.len() == 3usize.pow((c+1) as u32)*2usize.pow((i-c-1) as u32));
             }
         }
+    }
+
+    #[test]
+
+    fn trits_test() {
+        let c = 2;
+        println!("{:?}", compute_trit_mappings(c));
     }
 
     #[test]
