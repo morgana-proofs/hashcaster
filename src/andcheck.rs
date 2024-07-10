@@ -1,4 +1,4 @@
-use std::{arch::x86_64::{__m128i, _mm_and_si128, _mm_movemask_epi8, _mm_shuffle_epi8, _mm_slli_epi64, _mm_xor_si128}, mem::{transmute, MaybeUninit}, time::Instant};
+use std::{mem::{transmute, MaybeUninit}, time::Instant};
 
 use num_traits::{One, Pow, Zero};
 use crate::{field::{pi, F128}, parallelize::parallelize, utils::u128_to_bits};
