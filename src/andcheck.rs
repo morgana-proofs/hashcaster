@@ -1,4 +1,4 @@
-use std::{ mem::{transmute, MaybeUninit}, time::Instant};
+use std::{mem::{transmute, MaybeUninit}, time::Instant};
 
 use num_traits::{One, Pow, Zero};
 use crate::{field::{pi, F128}, parallelize::parallelize, utils::u128_to_bits};
