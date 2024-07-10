@@ -1,2 +1,3 @@
 pub mod autodetect;
-pub mod clmul;
+mod clmul;
+mod pmull;

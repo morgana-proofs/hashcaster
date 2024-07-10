@@ -1,5 +1,5 @@
 use std::{mem::transmute, ops::{Add, AddAssign, BitAnd, BitAndAssign, Mul, MulAssign}};
-use crate::{backend::clmul::alt_mul, precompute::{cobasis_frobenius_table::COBASIS_FROBENIUS, cobasis_table::COBASIS, frobenius_table::FROBENIUS}, utils::{u128_rand, u128_to_bits}};
+use crate::{backend::autodetect::mul_128, precompute::{cobasis_frobenius_table::COBASIS_FROBENIUS, cobasis_table::COBASIS, frobenius_table::FROBENIUS}, utils::{u128_rand, u128_to_bits}};
 use num_traits::{One, Zero};
 use rand::Rng;
 
@@ -134,7 +134,7 @@ impl Mul<F128> for F128 {
     type Output = F128;
 
     fn mul(self, rhs: F128) -> Self::Output {
-        Self::from_raw(alt_mul(self.raw, rhs.raw))
+        Self::from_raw(mul_128(self.raw, rhs.raw))
     }
 }
 
@@ -142,7 +142,7 @@ impl Mul<&F128> for F128 {
     type Output = F128;
 
     fn mul(self, rhs: &F128) -> Self::Output {
-        Self::from_raw(alt_mul(self.into_raw(), rhs.raw()))
+        Self::from_raw(mul_128(self.into_raw(), rhs.raw()))
     }
 }
 

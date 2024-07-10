@@ -148,168 +148,168 @@ pub fn extend_table(table: &[F128], dims: usize, c: usize) -> Vec<F128> {
     unsafe{transmute::<Vec<MaybeUninit<F128>>, Vec<F128>>(ret)}
 }
 
-/// Splits v by bits, and computes 128 vectors sum_j bit(i, v[j])w[j]
-/// Equivalently, treats first vector as 128 x l matrix, and second as l x 128 matrix,
-/// and computes 128x128 product.
-fn by_coord_product_naive(v: &[F128], w: &[F128]) -> Vec<F128> {
-    assert!(v.len() == w.len());
-    let mut ret = vec![F128::zero(); 128];
-    for j in 0..v.len() {
-        let bits = u128_to_bits(v[j].raw());
-        for k in 0..128 {
-            if bits[k] {ret[k] += w[j]}
-        }
-    }
-    ret
-}
+// /// Splits v by bits, and computes 128 vectors sum_j bit(i, v[j])w[j]
+// /// Equivalently, treats first vector as 128 x l matrix, and second as l x 128 matrix,
+// /// and computes 128x128 product.
+// fn by_coord_product_naive(v: &[F128], w: &[F128]) -> Vec<F128> {
+//     assert!(v.len() == w.len());
+//     let mut ret = vec![F128::zero(); 128];
+//     for j in 0..v.len() {
+//         let bits = u128_to_bits(v[j].raw());
+//         for k in 0..128 {
+//             if bits[k] {ret[k] += w[j]}
+//         }
+//     }
+//     ret
+// }
 
-#[unroll::unroll_for_loops]
-unsafe fn by_coord_product_nobits(v: &[F128], w: &[F128]) -> Vec<F128> {
-    assert!(v.len() == w.len());
-    let mut ret = vec![F128::zero(); 128];
-    for j in 0..v.len() {
-        let bytes: [u8; 16] = transmute::<F128, [u8; 16]>(v[j]);
-        for k in 0..16 {
-            for s in 0..8 {
-                if (bytes[k] >> s) % 2 != 0 {ret[k] += w[j]}
-            }
-        }
-    }
-    ret
-}
+// #[unroll::unroll_for_loops]
+// unsafe fn by_coord_product_nobits(v: &[F128], w: &[F128]) -> Vec<F128> {
+//     assert!(v.len() == w.len());
+//     let mut ret = vec![F128::zero(); 128];
+//     for j in 0..v.len() {
+//         let bytes: [u8; 16] = transmute::<F128, [u8; 16]>(v[j]);
+//         for k in 0..16 {
+//             for s in 0..8 {
+//                 if (bytes[k] >> s) % 2 != 0 {ret[k] += w[j]}
+//             }
+//         }
+//     }
+//     ret
+// }
 
-#[unroll::unroll_for_loops]
-unsafe fn by_coord_product_nobranch(v: &[F128], w: &[F128]) -> Vec<F128> {
-    assert!(v.len() == w.len());
-    let mut ret : Vec<u128> = vec![0; 128];
-    let mut ret = transmute::<_, Vec<__m128i>>(ret);
-    for j in 0..v.len() {
-        let bytes: [u8; 16] = transmute::<F128, [u8; 16]>(v[j]);
-        for k in 0..16 {
-            let byte = bytes[k];
-            for s in 0..8 {
-                let control = 0u128.wrapping_sub(((byte >> s) % 2) as u128);
-                ret[k] = _mm_xor_si128(ret[k], _mm_and_si128(transmute::<F128, __m128i>(w[j]), transmute(control)));
-            }
-        }
-    }
-    transmute(ret)
-}
+// #[unroll::unroll_for_loops]
+// unsafe fn by_coord_product_nobranch(v: &[F128], w: &[F128]) -> Vec<F128> {
+//     assert!(v.len() == w.len());
+//     let mut ret : Vec<u128> = vec![0; 128];
+//     let mut ret = transmute::<_, Vec<__m128i>>(ret);
+//     for j in 0..v.len() {
+//         let bytes: [u8; 16] = transmute::<F128, [u8; 16]>(v[j]);
+//         for k in 0..16 {
+//             let byte = bytes[k];
+//             for s in 0..8 {
+//                 let control = 0u128.wrapping_sub(((byte >> s) % 2) as u128);
+//                 ret[k] = _mm_xor_si128(ret[k], _mm_and_si128(transmute::<F128, __m128i>(w[j]), transmute(control)));
+//             }
+//         }
+//     }
+//     transmute(ret)
+// }
 
-fn _by_coord_product_4_ru (v: &[F128], w: &[F128]) -> Vec<F128> {
-    let mut target = vec![F128::zero(); 128];
-    by_coord_product_4_ru(v, w, &mut target.iter_mut().collect_vec());
-    target
-}
+// fn _by_coord_product_4_ru (v: &[F128], w: &[F128]) -> Vec<F128> {
+//     let mut target = vec![F128::zero(); 128];
+//     by_coord_product_4_ru(v, w, &mut target.iter_mut().collect_vec());
+//     target
+// }
 
-//#[unroll::unroll_for_loops]
-fn by_coord_product_4_ru(v: &[F128], w: &[F128], target: &mut [&mut F128]) {
-unsafe{
-    let target = transmute::<_, &mut [&mut u128]>(target);
+// //#[unroll::unroll_for_loops]
+// fn by_coord_product_4_ru(v: &[F128], w: &[F128], target: &mut [&mut F128]) {
+// unsafe{
+//     let target = transmute::<_, &mut [&mut u128]>(target);
     
-    let mut j = 0;
-    loop {
-        let chunk = transmute::<&[F128], &[[u8; 16]]>(&v[j .. j + 16]);
+//     let mut j = 0;
+//     loop {
+//         let chunk = transmute::<&[F128], &[[u8; 16]]>(&v[j .. j + 16]);
 
-        let mut xortable = [MaybeUninit::<u128>::uninit(); 16];        
-        xortable[0b0000] = transmute(0u128);
-        xortable[0b0001] = transmute(w[j]);
-        xortable[0b0010] = transmute(w[j + 1]);
-        xortable[0b0100] = transmute(w[j + 2]);
-        xortable[0b1000] = transmute(w[j + 3]);
-        xortable[0b0011] = transmute(xortable[0b0001].assume_init() ^ xortable[0b0010].assume_init());
-        xortable[0b0101] = transmute(xortable[0b0100].assume_init() ^ xortable[0b0001].assume_init());
-        xortable[0b0110] = transmute(xortable[0b0100].assume_init() ^ xortable[0b0010].assume_init());
-        xortable[0b0111] = transmute(xortable[0b0101].assume_init() ^ xortable[0b0010].assume_init());
-        xortable[0b1001] = transmute(xortable[0b1000].assume_init() ^ xortable[0b0001].assume_init());
-        xortable[0b1010] = transmute(xortable[0b1000].assume_init() ^ xortable[0b0010].assume_init());
-        xortable[0b1011] = transmute(xortable[0b1000].assume_init() ^ xortable[0b0011].assume_init());
-        xortable[0b1100] = transmute(xortable[0b1000].assume_init() ^ xortable[0b0100].assume_init());
-        xortable[0b1101] = transmute(xortable[0b1000].assume_init() ^ xortable[0b0101].assume_init());
-        xortable[0b1110] = transmute(xortable[0b1000].assume_init() ^ xortable[0b0110].assume_init());
-        xortable[0b1111] = transmute(xortable[0b1000].assume_init() ^ xortable[0b0111].assume_init());
-        let xortable : [u128; 16] = transmute(xortable);
+//         let mut xortable = [MaybeUninit::<u128>::uninit(); 16];        
+//         xortable[0b0000] = transmute(0u128);
+//         xortable[0b0001] = transmute(w[j]);
+//         xortable[0b0010] = transmute(w[j + 1]);
+//         xortable[0b0100] = transmute(w[j + 2]);
+//         xortable[0b1000] = transmute(w[j + 3]);
+//         xortable[0b0011] = transmute(xortable[0b0001].assume_init() ^ xortable[0b0010].assume_init());
+//         xortable[0b0101] = transmute(xortable[0b0100].assume_init() ^ xortable[0b0001].assume_init());
+//         xortable[0b0110] = transmute(xortable[0b0100].assume_init() ^ xortable[0b0010].assume_init());
+//         xortable[0b0111] = transmute(xortable[0b0101].assume_init() ^ xortable[0b0010].assume_init());
+//         xortable[0b1001] = transmute(xortable[0b1000].assume_init() ^ xortable[0b0001].assume_init());
+//         xortable[0b1010] = transmute(xortable[0b1000].assume_init() ^ xortable[0b0010].assume_init());
+//         xortable[0b1011] = transmute(xortable[0b1000].assume_init() ^ xortable[0b0011].assume_init());
+//         xortable[0b1100] = transmute(xortable[0b1000].assume_init() ^ xortable[0b0100].assume_init());
+//         xortable[0b1101] = transmute(xortable[0b1000].assume_init() ^ xortable[0b0101].assume_init());
+//         xortable[0b1110] = transmute(xortable[0b1000].assume_init() ^ xortable[0b0110].assume_init());
+//         xortable[0b1111] = transmute(xortable[0b1000].assume_init() ^ xortable[0b0111].assume_init());
+//         let xortable : [u128; 16] = transmute(xortable);
 
-        let mut xortable2 = [MaybeUninit::<u128>::uninit(); 16];        
-        xortable2[0b0000] = transmute(0u128);
-        xortable2[0b0001] = transmute(w[j + 4]);
-        xortable2[0b0010] = transmute(w[j + 5]);
-        xortable2[0b0100] = transmute(w[j + 6]);
-        xortable2[0b1000] = transmute(w[j + 7]);
-        xortable2[0b0011] = transmute(xortable2[0b0001].assume_init() ^ xortable2[0b0010].assume_init());
-        xortable2[0b0101] = transmute(xortable2[0b0100].assume_init() ^ xortable2[0b0001].assume_init());
-        xortable2[0b0110] = transmute(xortable2[0b0100].assume_init() ^ xortable2[0b0010].assume_init());
-        xortable2[0b0111] = transmute(xortable2[0b0101].assume_init() ^ xortable2[0b0010].assume_init());
-        xortable2[0b1001] = transmute(xortable2[0b1000].assume_init() ^ xortable2[0b0001].assume_init());
-        xortable2[0b1010] = transmute(xortable2[0b1000].assume_init() ^ xortable2[0b0010].assume_init());
-        xortable2[0b1011] = transmute(xortable2[0b1000].assume_init() ^ xortable2[0b0011].assume_init());
-        xortable2[0b1100] = transmute(xortable2[0b1000].assume_init() ^ xortable2[0b0100].assume_init());
-        xortable2[0b1101] = transmute(xortable2[0b1000].assume_init() ^ xortable2[0b0101].assume_init());
-        xortable2[0b1110] = transmute(xortable2[0b1000].assume_init() ^ xortable2[0b0110].assume_init());
-        xortable2[0b1111] = transmute(xortable2[0b1000].assume_init() ^ xortable2[0b0111].assume_init());
-        let xortable2 : [u128; 16] = transmute(xortable2);
+//         let mut xortable2 = [MaybeUninit::<u128>::uninit(); 16];        
+//         xortable2[0b0000] = transmute(0u128);
+//         xortable2[0b0001] = transmute(w[j + 4]);
+//         xortable2[0b0010] = transmute(w[j + 5]);
+//         xortable2[0b0100] = transmute(w[j + 6]);
+//         xortable2[0b1000] = transmute(w[j + 7]);
+//         xortable2[0b0011] = transmute(xortable2[0b0001].assume_init() ^ xortable2[0b0010].assume_init());
+//         xortable2[0b0101] = transmute(xortable2[0b0100].assume_init() ^ xortable2[0b0001].assume_init());
+//         xortable2[0b0110] = transmute(xortable2[0b0100].assume_init() ^ xortable2[0b0010].assume_init());
+//         xortable2[0b0111] = transmute(xortable2[0b0101].assume_init() ^ xortable2[0b0010].assume_init());
+//         xortable2[0b1001] = transmute(xortable2[0b1000].assume_init() ^ xortable2[0b0001].assume_init());
+//         xortable2[0b1010] = transmute(xortable2[0b1000].assume_init() ^ xortable2[0b0010].assume_init());
+//         xortable2[0b1011] = transmute(xortable2[0b1000].assume_init() ^ xortable2[0b0011].assume_init());
+//         xortable2[0b1100] = transmute(xortable2[0b1000].assume_init() ^ xortable2[0b0100].assume_init());
+//         xortable2[0b1101] = transmute(xortable2[0b1000].assume_init() ^ xortable2[0b0101].assume_init());
+//         xortable2[0b1110] = transmute(xortable2[0b1000].assume_init() ^ xortable2[0b0110].assume_init());
+//         xortable2[0b1111] = transmute(xortable2[0b1000].assume_init() ^ xortable2[0b0111].assume_init());
+//         let xortable2 : [u128; 16] = transmute(xortable2);
 
-        let mut xortable3 = [MaybeUninit::<u128>::uninit(); 16];        
-        xortable3[0b0000] = transmute(0u128);
-        xortable3[0b0001] = transmute(w[j + 8]);
-        xortable3[0b0010] = transmute(w[j + 9]);
-        xortable3[0b0100] = transmute(w[j + 10]);
-        xortable3[0b1000] = transmute(w[j + 11]);
-        xortable3[0b0011] = transmute(xortable3[0b0001].assume_init() ^ xortable3[0b0010].assume_init());
-        xortable3[0b0101] = transmute(xortable3[0b0100].assume_init() ^ xortable3[0b0001].assume_init());
-        xortable3[0b0110] = transmute(xortable3[0b0100].assume_init() ^ xortable3[0b0010].assume_init());
-        xortable3[0b0111] = transmute(xortable3[0b0101].assume_init() ^ xortable3[0b0010].assume_init());
-        xortable3[0b1001] = transmute(xortable3[0b1000].assume_init() ^ xortable3[0b0001].assume_init());
-        xortable3[0b1010] = transmute(xortable3[0b1000].assume_init() ^ xortable3[0b0010].assume_init());
-        xortable3[0b1011] = transmute(xortable3[0b1000].assume_init() ^ xortable3[0b0011].assume_init());
-        xortable3[0b1100] = transmute(xortable3[0b1000].assume_init() ^ xortable3[0b0100].assume_init());
-        xortable3[0b1101] = transmute(xortable3[0b1000].assume_init() ^ xortable3[0b0101].assume_init());
-        xortable3[0b1110] = transmute(xortable3[0b1000].assume_init() ^ xortable3[0b0110].assume_init());
-        xortable3[0b1111] = transmute(xortable3[0b1000].assume_init() ^ xortable3[0b0111].assume_init());
-        let xortable3 : [u128; 16] = transmute(xortable3);
+//         let mut xortable3 = [MaybeUninit::<u128>::uninit(); 16];        
+//         xortable3[0b0000] = transmute(0u128);
+//         xortable3[0b0001] = transmute(w[j + 8]);
+//         xortable3[0b0010] = transmute(w[j + 9]);
+//         xortable3[0b0100] = transmute(w[j + 10]);
+//         xortable3[0b1000] = transmute(w[j + 11]);
+//         xortable3[0b0011] = transmute(xortable3[0b0001].assume_init() ^ xortable3[0b0010].assume_init());
+//         xortable3[0b0101] = transmute(xortable3[0b0100].assume_init() ^ xortable3[0b0001].assume_init());
+//         xortable3[0b0110] = transmute(xortable3[0b0100].assume_init() ^ xortable3[0b0010].assume_init());
+//         xortable3[0b0111] = transmute(xortable3[0b0101].assume_init() ^ xortable3[0b0010].assume_init());
+//         xortable3[0b1001] = transmute(xortable3[0b1000].assume_init() ^ xortable3[0b0001].assume_init());
+//         xortable3[0b1010] = transmute(xortable3[0b1000].assume_init() ^ xortable3[0b0010].assume_init());
+//         xortable3[0b1011] = transmute(xortable3[0b1000].assume_init() ^ xortable3[0b0011].assume_init());
+//         xortable3[0b1100] = transmute(xortable3[0b1000].assume_init() ^ xortable3[0b0100].assume_init());
+//         xortable3[0b1101] = transmute(xortable3[0b1000].assume_init() ^ xortable3[0b0101].assume_init());
+//         xortable3[0b1110] = transmute(xortable3[0b1000].assume_init() ^ xortable3[0b0110].assume_init());
+//         xortable3[0b1111] = transmute(xortable3[0b1000].assume_init() ^ xortable3[0b0111].assume_init());
+//         let xortable3 : [u128; 16] = transmute(xortable3);
 
-        let mut xortable4 = [MaybeUninit::<u128>::uninit(); 16];        
-        xortable4[0b0000] = transmute(0u128);
-        xortable4[0b0001] = transmute(w[j + 12]);
-        xortable4[0b0010] = transmute(w[j + 13]);
-        xortable4[0b0100] = transmute(w[j + 14]);
-        xortable4[0b1000] = transmute(w[j + 15]);
-        xortable4[0b0011] = transmute(xortable4[0b0001].assume_init() ^ xortable4[0b0010].assume_init());
-        xortable4[0b0101] = transmute(xortable4[0b0100].assume_init() ^ xortable4[0b0001].assume_init());
-        xortable4[0b0110] = transmute(xortable4[0b0100].assume_init() ^ xortable4[0b0010].assume_init());
-        xortable4[0b0111] = transmute(xortable4[0b0101].assume_init() ^ xortable4[0b0010].assume_init());
-        xortable4[0b1001] = transmute(xortable4[0b1000].assume_init() ^ xortable4[0b0001].assume_init());
-        xortable4[0b1010] = transmute(xortable4[0b1000].assume_init() ^ xortable4[0b0010].assume_init());
-        xortable4[0b1011] = transmute(xortable4[0b1000].assume_init() ^ xortable4[0b0011].assume_init());
-        xortable4[0b1100] = transmute(xortable4[0b1000].assume_init() ^ xortable4[0b0100].assume_init());
-        xortable4[0b1101] = transmute(xortable4[0b1000].assume_init() ^ xortable4[0b0101].assume_init());
-        xortable4[0b1110] = transmute(xortable4[0b1000].assume_init() ^ xortable4[0b0110].assume_init());
-        xortable4[0b1111] = transmute(xortable4[0b1000].assume_init() ^ xortable4[0b0111].assume_init());
-        let xortable4 : [u128; 16] = transmute(xortable4);
+//         let mut xortable4 = [MaybeUninit::<u128>::uninit(); 16];        
+//         xortable4[0b0000] = transmute(0u128);
+//         xortable4[0b0001] = transmute(w[j + 12]);
+//         xortable4[0b0010] = transmute(w[j + 13]);
+//         xortable4[0b0100] = transmute(w[j + 14]);
+//         xortable4[0b1000] = transmute(w[j + 15]);
+//         xortable4[0b0011] = transmute(xortable4[0b0001].assume_init() ^ xortable4[0b0010].assume_init());
+//         xortable4[0b0101] = transmute(xortable4[0b0100].assume_init() ^ xortable4[0b0001].assume_init());
+//         xortable4[0b0110] = transmute(xortable4[0b0100].assume_init() ^ xortable4[0b0010].assume_init());
+//         xortable4[0b0111] = transmute(xortable4[0b0101].assume_init() ^ xortable4[0b0010].assume_init());
+//         xortable4[0b1001] = transmute(xortable4[0b1000].assume_init() ^ xortable4[0b0001].assume_init());
+//         xortable4[0b1010] = transmute(xortable4[0b1000].assume_init() ^ xortable4[0b0010].assume_init());
+//         xortable4[0b1011] = transmute(xortable4[0b1000].assume_init() ^ xortable4[0b0011].assume_init());
+//         xortable4[0b1100] = transmute(xortable4[0b1000].assume_init() ^ xortable4[0b0100].assume_init());
+//         xortable4[0b1101] = transmute(xortable4[0b1000].assume_init() ^ xortable4[0b0101].assume_init());
+//         xortable4[0b1110] = transmute(xortable4[0b1000].assume_init() ^ xortable4[0b0110].assume_init());
+//         xortable4[0b1111] = transmute(xortable4[0b1000].assume_init() ^ xortable4[0b0111].assume_init());
+//         let xortable4 : [u128; 16] = transmute(xortable4);
 
-        for k in 0..16 {
-            let mut x = transmute::<_, __m128i>(
-                [chunk[15][k], chunk[14][k], chunk[13][k], chunk[12][k], chunk[11][k], chunk[10][k], chunk[9][k], chunk[8][k],
-                     chunk[7][k], chunk[6][k], chunk[5][k], chunk[4][k], chunk[3][k], chunk[2][k], chunk[1][k], chunk[0][k],]
-            );
-            for s in 0..8 {
-                let addr = _mm_movemask_epi8(x);
-                *target[k] ^= xortable[(addr & 15) as usize];
-                *target[k] ^= xortable2[((addr >> 4) & 15) as usize];
-                *target[k] ^= xortable3[((addr >> 8) & 15) as usize];
-                *target[k] ^= xortable4[(addr >> 12) as usize];
+//         for k in 0..16 {
+//             let mut x = transmute::<_, __m128i>(
+//                 [chunk[15][k], chunk[14][k], chunk[13][k], chunk[12][k], chunk[11][k], chunk[10][k], chunk[9][k], chunk[8][k],
+//                      chunk[7][k], chunk[6][k], chunk[5][k], chunk[4][k], chunk[3][k], chunk[2][k], chunk[1][k], chunk[0][k],]
+//             );
+//             for s in 0..8 {
+//                 let addr = _mm_movemask_epi8(x);
+//                 *target[k] ^= xortable[(addr & 15) as usize];
+//                 *target[k] ^= xortable2[((addr >> 4) & 15) as usize];
+//                 *target[k] ^= xortable3[((addr >> 8) & 15) as usize];
+//                 *target[k] ^= xortable4[(addr >> 12) as usize];
                 
-                x = _mm_slli_epi64(x,1);
-            }
-        };
+//                 x = _mm_slli_epi64(x,1);
+//             }
+//         };
         
-        j += 16;
-        if j >= v.len() {
-            break;
-        }
-    }
-}
-}
+//         j += 16;
+//         if j >= v.len() {
+//             break;
+//         }
+//     }
+// }
+// }
 
 /// This function takes a F128-valued polynomial P, and computes restrictions of
 /// its F2-valued coordinates P_i = pi_i(P) - i.e. it returns 128 polynomials
@@ -654,9 +654,7 @@ mod tests {
     use num_traits::Zero;
     use rand::rngs::OsRng;
 
-    use crate::{andcheck::{_by_coord_product_4_ru, by_coord_product_4_ru, by_coord_product_nobits, by_coord_product_nobranch, eq_ev}, field::F128, utils::u128_idx};
-
-    use super::{by_coord_product_naive, compute_trit_mappings, eq_poly, evaluate, extend_table, restrict, AndcheckProver};
+    use super::*;
 
     #[test]
     fn test_eq_ev() {
@@ -731,49 +729,49 @@ mod tests {
         }
     }
 
-    #[test]
-    fn bitprod() {
-        let rng = &mut OsRng;
-        let mut a = F128::rand(rng);
-        let mut b = F128::rand(rng);
-        let mut v = vec![];
-        let mut w = vec![];
-        for i in 0..(1 << 19) {
-            v.push(a);
-            w.push(b);
-            a *= a;
-            b *= b;
-        }
+    // #[test]
+    // fn bitprod() {
+    //     let rng = &mut OsRng;
+    //     let mut a = F128::rand(rng);
+    //     let mut b = F128::rand(rng);
+    //     let mut v = vec![];
+    //     let mut w = vec![];
+    //     for i in 0..(1 << 19) {
+    //         v.push(a);
+    //         w.push(b);
+    //         a *= a;
+    //         b *= b;
+    //     }
 
-        let start = Instant::now();
-        let p = by_coord_product_naive(&v, &w);
-        let end = Instant::now();
+    //     let start = Instant::now();
+    //     let p = by_coord_product_naive(&v, &w);
+    //     let end = Instant::now();
 
-        println!("Naive prod took {} ms", (end - start).as_millis());
+    //     println!("Naive prod took {} ms", (end - start).as_millis());
 
-        let start = Instant::now();
-        let q = unsafe{by_coord_product_nobits(&v, &w)};
-        let end = Instant::now();
+    //     let start = Instant::now();
+    //     let q = unsafe{by_coord_product_nobits(&v, &w)};
+    //     let end = Instant::now();
 
-        println!("Nobits prod took {} ms", (end - start).as_millis());
+    //     println!("Nobits prod took {} ms", (end - start).as_millis());
 
-        let start = Instant::now();
-        let r = unsafe{by_coord_product_nobranch(&v, &w)};
-        let end = Instant::now();
+    //     let start = Instant::now();
+    //     let r = unsafe{by_coord_product_nobranch(&v, &w)};
+    //     let end = Instant::now();
 
-        println!("Nobranch prod took {} ms", (end - start).as_millis());
+    //     println!("Nobranch prod took {} ms", (end - start).as_millis());
 
-        let start = Instant::now();
-        let s = _by_coord_product_4_ru(&v, &w);
-        let end = Instant::now();
+    //     let start = Instant::now();
+    //     let s = _by_coord_product_4_ru(&v, &w);
+    //     let end = Instant::now();
 
-        println!("Nobranch 4 russians prod took {} ms", (end - start).as_millis());
+    //     println!("Nobranch 4 russians prod took {} ms", (end - start).as_millis());
 
-        assert_eq!(p, q);
-        assert_eq!(q, r);
-        assert_eq!(r, s)
+    //     assert_eq!(p, q);
+    //     assert_eq!(q, r);
+    //     assert_eq!(r, s)
 
-    }
+    // }
 
     #[test]
     fn verify_prover() {

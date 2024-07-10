@@ -3,8 +3,8 @@ use std::{arch::x86_64::{__m128i, _mm_clmulepi64_si128, _mm_shuffle_epi32, _mm_s
 // Using polyval impl from rust-crypto as a reference.
 // I also use this as opportunity to learn about x86 instructions.
 
-
-pub fn alt_mul(a: u128, b:u128) -> u128 {
+#[inline(always)]
+pub fn mul_128(a: u128, b:u128) -> u128 {
     unsafe{transmute(mul(transmute(a), transmute(b)))}
 }
 
