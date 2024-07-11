@@ -127,11 +127,11 @@ pub fn cpu_v_movemask_epi8(x: [u8; 16]) -> i32 {
 }
 
 
-pub(crate) fn v_movemask_epi8(input: uint8x16_t) -> i32 {
+pub(crate) fn v_movemask_epi8(input: [u8; 16]) -> i32 {
     let uc_shift: [i8; 16] = [-7, -6, -5, -4, -3, -2, -1, 0, -7, -6, -5, -4, -3, -2, -1, 0];
     let vshift = unsafe { vld1q_s8(uc_shift.as_ptr()) };
 
-    let vmask = unsafe { vandq_u8(input, vdupq_n_u8(0x80)) };
+    let vmask = unsafe { vandq_u8(transmute(input), vdupq_n_u8(0x80)) };
     let shifted_mask = unsafe { vshlq_u8(vmask, vshift) };
 
     let lower_sum = unsafe { vaddv_u8(vget_low_u8(shifted_mask)) } as u32;
