@@ -1,4 +1,4 @@
-use std::{mem::{transmute, MaybeUninit}, time::Instant, arch::aarch64::{uint8x16_t, vld1q_u8, vandq_u8, vdupq_n_u8, vshlq_u8, vaddv_u8, vget_low_u8, vget_high_u8, vld1q_s8}};
+use std::{mem::{transmute, MaybeUninit}, time::Instant};
 
 use num_traits::{One, Pow, Zero};
 use rand::{rngs::OsRng, RngCore};
