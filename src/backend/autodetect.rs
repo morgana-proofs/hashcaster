@@ -11,3 +11,7 @@ pub fn mul_128(a: u128, b: u128) -> u128 {
 pub fn v_movemask_epi8(x: [u8; 16]) -> i32 {
     unsafe{stuff::v_movemask_epi8(x)}
 }
+
+pub fn v_slli_epi64<const K: i32>(x: [u8; 16]) -> [u8; 16] {
+    unsafe{stuff::v_slli_epi64::<K>(x)}
+}
