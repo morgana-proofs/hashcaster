@@ -1,7 +1,7 @@
-use std::{mem::{transmute, MaybeUninit}, time::Instant};
+use std::{mem::{transmute, MaybeUninit}, time::Instant, arch::aarch64::{uint8x16_t, vld1q_u8, vandq_u8, vdupq_n_u8, vshlq_u8, vaddv_u8, vget_low_u8, vget_high_u8, vld1q_s8}};
 
 use num_traits::{One, Pow, Zero};
-use rayon::iter::{IndexedParallelIterator, IntoParallelIterator, IntoParallelRefIterator, IntoParallelRefMutIterator, ParallelIterator};
+use rand::{rngs::OsRng, RngCore};
 use crate::{field::{pi, F128}, parallelize::parallelize, utils::u128_to_bits};
 use itertools::Itertools;
 
@@ -100,89 +100,10 @@ fn compute_trit_mappings(c: usize)  -> (Vec<u16>, Vec<u16>) {
 }
 
 
-pub fn alt_extend(table: &[F128], dims: usize, c: usize) -> Vec<F128> {
-    assert!(table.len() == 1 << dims);
-    assert!(c < dims);
-    let mut target = vec![MaybeUninit::uninit(); 3usize.pow((c + 1) as u32) << (dims - c - 1)];
-    unsafe {
-        _alt_extend(table, &mut target);
-        transmute(target)
-    }
-}
-
-unsafe fn _alt_extend(table: &[F128], target: &mut[MaybeUninit<F128>]) {
-    if target.len() == table.len() {
-        target.copy_from_slice(transmute(table));
-        return
-    }
-    let a = table.len() / 2;
-    let b = target.len() / 3;
-    let (t0, t1) = table.split_at(a);
-    let (s0, tmp) = target.split_at_mut(b);
-    let (s1, s2) = tmp.split_at_mut(b);
-
-    _alt_extend(t0, s0);
-    _alt_extend(t1, s1);
-
-    s0.par_iter().zip(s1.par_iter()).zip(s2.par_iter_mut())
-        .map(|((x, y), z)| *z = MaybeUninit::new(x.assume_init() + y.assume_init())).count();
-}
-
-pub fn alt_extend_2(table: &[F128], dims: usize, c: usize) -> Vec<F128> {
-    assert!(table.len() == 1 << dims);
-    assert!(c < dims);
-    let pow3 = 3usize.pow((c + 1) as u32);
-    assert!(pow3 < (u16::MAX) as usize, "This is too large anyway ;)");
-    let pow2 = 2usize.pow((dims - c - 1) as u32);
-    let mut ret = vec![MaybeUninit::<F128>::uninit(); pow3 << (dims - c - 1)];
-    for i in 0..pow3 {
-        let mut head = i;
-        let mut offset_3 = 1;
-        let mut counter = 0;
-        let mut bitmask = 0;
-        let mut trit;     
-        loop {
-            trit = head % 3;
-            head = head / 3;
-            if trit == 2 {
-                // Compute 3 slices: [i * pow2, (i+1) * pow]
-                // [(i - offset) * pow, (i - offset + 1) * pow]
-                // [(i - 2*offset) * pow, (i - 2*offset + 1) * pow]
-                let (t1, t2) = ret.split_at_mut(i * pow2);
-                let a = &t1[(i - offset_3) * pow2 .. (i - offset_3 + 1) * pow2];
-                let b = &t1[(i - 2 * offset_3) * pow2 .. (i - 2 * offset_3 + 1) * pow2];
-                let c = &mut t2[.. pow2];
-                c.par_iter_mut().zip(a.par_iter().zip(b.par_iter()))
-                    .map(|(c, (a, b))| {
-                        unsafe{*c = MaybeUninit::new(a.assume_init() + b.assume_init())}
-                    })
-                    .count();
-                break;
-            }
-            bitmask += trit << counter;
-            offset_3 *= 3;
-            counter += 1;
-
-            if head == 0 {
-                ret[i * pow2 .. i * pow2 + pow2].copy_from_slice(
-                    unsafe{transmute(&table[bitmask * pow2 .. bitmask * pow2 + pow2])}
-                );
-                break;
-            }
-
-        }
-
-    }
-    unsafe {transmute(ret)}
-
-}
-
 /// Makes table 3^{c+1} * 2^{dims - c - 1}
 pub fn extend_table(table: &[F128], dims: usize, c: usize) -> Vec<F128> {
     // TODO: suggest adding parallelization only on 2^k layer, as this algo for extension doesn't work well in parallel
     
-    // let label0 = Instant::now();
-
     assert!(table.len() == 1 << dims);
     assert!(c < dims);
     let pow3 = 3usize.pow((c + 1) as u32);
@@ -191,20 +112,13 @@ pub fn extend_table(table: &[F128], dims: usize, c: usize) -> Vec<F128> {
 
     let (bits_mapping, trits_mapping) = compute_trit_mappings(c);
 
-    // let label1 = Instant::now();
-
-    let mut ret = vec![MaybeUninit::<F128>::uninit(); pow3 * pow2];
-    for i in 0..pow2 {
-        let t = i * pow3;
-        let mut s = i << (c + 1);
-        for j in 0.. (1 << (c+1)) {
-            let k = bits_mapping[j] as usize + t;
-            ret[k] = MaybeUninit::new(table[s]);
-            s += 1;
-        }
+    let mut ret = vec![MaybeUninit::uninit(); pow3 * pow2];
+    for i in 0..(1 << dims) {
+        let hi = i >> (c + 1);
+        let lo = i ^ (hi << (c + 1));
+        let j = bits_mapping[lo] as usize + hi * pow3;
+        ret[j] = MaybeUninit::new(table[i]);
     }
-
-    // let label2 = Instant::now();
 
     let mut task_size = pow3;
     let mut d = 0;
@@ -216,16 +130,15 @@ pub fn extend_table(table: &[F128], dims: usize, c: usize) -> Vec<F128> {
     parallelize(|chunk, i_offset| {
         for q in 0 .. 1 << d {
             for j in 0..pow3 {
-                let offset = trits_mapping[j];
+                let offset = trits_mapping[j] as usize;
                 //let i = (q as usize) + (i_offset >> d);
                 // actual index: j + i * pow3
                 let idx = (q as usize) * pow3 + j as usize;
-                unsafe {
-                chunk[idx] = 
-                    transmute::<u128, MaybeUninit<F128>>(
-                    chunk[idx - offset as usize].assume_init().raw ^
-                    (chunk[idx - 2 * offset as usize].assume_init().raw & (0u128.wrapping_sub((offset % 2) as u128)))
-                    );
+                
+                if offset != 0 {
+                    unsafe{
+                        chunk[idx] = MaybeUninit::new(chunk[idx - offset].assume_init() + chunk[idx - 2*offset].assume_init());// set it 0 and 1, add values
+                    }
                 }
             };
         }    
@@ -233,17 +146,7 @@ pub fn extend_table(table: &[F128], dims: usize, c: usize) -> Vec<F128> {
     &mut ret,
     task_size,
     );
-
-    // let label3 = Instant::now();
-
-    // println!(
-    //     "Extend table timings:\nCompute trit mappings: {} mcs\nInitialize table: {} mcs\nExtend table: {} mcs",
-    //     (label1 - label0).as_micros(),
-    //     (label2 - label1).as_micros(),
-    //     (label3 - label2).as_micros(),
-    // );
-
-    unsafe{ transmute(ret) }
+    unsafe{transmute::<Vec<MaybeUninit<F128>>, Vec<F128>>(ret)}
 }
 
 // /// Splits v by bits, and computes 128 vectors sum_j bit(i, v[j])w[j]
@@ -438,6 +341,9 @@ pub fn restrict(mut poly: Vec<F128>, coords: &[F128], dims: usize) -> Vec<Vec<F1
     ret
 }
 
+
+
+
 pub struct AndcheckProver {
     pt: Vec<F128>,
     p: Option<Vec<F128>>,
@@ -496,14 +402,11 @@ impl AndcheckProver {
         let start = Instant::now();
         let p_ext = extend_table(&p, pt.len(), phase_switch);
         let q_ext = extend_table(&q, pt.len(), phase_switch);
-
-        let after_ext = Instant::now();
-
         let p_q_ext = p_ext.iter().zip_eq(q_ext.iter()).map(|(a, b)| *a & *b).collect();
 
         let end = Instant::now();
 
-        println!("AndcheckProver::new timings\nExtensions: {} ms\nP&Q evals: {} ms\n", (after_ext - start).as_millis(), (end-after_ext).as_millis());
+        println!("AndcheckProver::new time {} ms", (end-start).as_millis());
 
         Self{
             pt,
@@ -828,37 +731,6 @@ mod tests {
         for i in 0..128 {
             assert!(evaluate(&answer[i], &pt[num_vars_to_restrict..]) == evaluate(&poly_unzip[i], &pt));
         }
-    }
-
-    #[test]
-    fn extends_vs() {
-        let rng = &mut OsRng;
-        let mut a = F128::rand(rng);
-        let mut b = F128::rand(rng);
-        let mut v = vec![];
-        let mut w = vec![];
-        for i in 0..(1<<19) {
-            v.push(a);
-            w.push(b);
-            a *= a;
-            b *= b;
-            a += F128::from_raw(3294703249);
-            b += F128::from_raw(892347934);
-        }
-
-        let l0 = Instant::now();
-        let a = extend_table(&v,19, 5);
-        let l1 = Instant::now();
-        let b = alt_extend(&v, 19, 5);
-        let l2 = Instant::now();
-        let c = alt_extend_2(&v, 19, 5);
-        let l3 = Instant::now();
-
-        println!("extend_table: {} ms", (l1 - l0).as_millis());
-        println!("alt_extend: {} ms", (l2 - l1).as_millis());
-        println!("alt_extend_2: {} ms", (l3 - l2).as_millis());
-
-        assert_eq!(b, c);
     }
 
     // #[test]

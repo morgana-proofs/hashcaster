@@ -1,3 +1,5 @@
+use std::mem::transmute;
+
 #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
 use super::x86 as stuff;
 
@@ -9,5 +11,5 @@ pub fn mul_128(a: u128, b: u128) -> u128 {
 }
 
 pub fn v_movemask_epi8(x: [u8; 16]) -> i32 {
-    unsafe{stuff::v_movemask_epi8(x)}
+    unsafe{stuff::v_movemask_epi8(transmute(x))}
 }
