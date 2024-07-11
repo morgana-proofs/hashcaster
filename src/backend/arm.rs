@@ -219,3 +219,6 @@ fn test_for_mm_movemask_aarch64() {
     println!("Lev {} nanos", (end - start).as_nanos());
 
 }
+pub unsafe fn v_slli_epi64<const K: i32>(x: [u8; 16]) -> [u8; 16] {
+    todo!()
+}
