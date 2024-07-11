@@ -2,7 +2,8 @@ use std::{mem::{transmute, MaybeUninit}, time::Instant};
 
 use num_traits::{One, Pow, Zero};
 use rand::{rngs::OsRng, RngCore};
-use crate::{field::{pi, F128}, parallelize::parallelize, utils::u128_to_bits};
+use rayon::iter::{IndexedParallelIterator, IntoParallelRefIterator, IntoParallelRefMutIterator, ParallelIterator};
+use crate::{backend::autodetect::{v_movemask_epi8, v_slli_epi64}, field::{pi, F128}, parallelize::parallelize, utils::u128_to_bits};
 use itertools::Itertools;
 
 pub fn eq_poly(pt: &[F128]) -> Vec<F128> {
@@ -100,6 +101,36 @@ fn compute_trit_mappings(c: usize)  -> (Vec<u16>, Vec<u16>) {
 }
 
 
+pub fn extend_table2(table: &[F128], dims: usize, c: usize) -> Vec<F128> {
+    assert!(table.len() == 1 << dims);
+    assert!(c < dims);
+    let mut target = vec![MaybeUninit::uninit(); 3usize.pow((c + 1) as u32) << (dims - c - 1)];
+    unsafe {
+        _extend_table2(table, &mut target);
+        transmute(target)
+    }
+}
+
+unsafe fn _extend_table2(table: &[F128], target: &mut[MaybeUninit<F128>]) {
+    if target.len() == table.len() {
+        target.copy_from_slice(transmute(table));
+        return
+    }
+    let a = table.len() / 2;
+    let b = target.len() / 3;
+    let (t0, t1) = table.split_at(a);
+    let (s0, tmp) = target.split_at_mut(b);
+    let (s1, s2) = tmp.split_at_mut(b);
+
+    _extend_table2(t0, s0);
+    _extend_table2(t1, s1);
+
+    s0.par_iter().zip(s1.par_iter()).zip(s2.par_iter_mut())
+        .map(|((x, y), z)| *z = MaybeUninit::new(x.assume_init() + y.assume_init())).count();
+}
+
+
+
 /// Makes table 3^{c+1} * 2^{dims - c - 1}
 pub fn extend_table(table: &[F128], dims: usize, c: usize) -> Vec<F128> {
     // TODO: suggest adding parallelization only on 2^k layer, as this algo for extension doesn't work well in parallel
@@ -149,168 +180,74 @@ pub fn extend_table(table: &[F128], dims: usize, c: usize) -> Vec<F128> {
     unsafe{transmute::<Vec<MaybeUninit<F128>>, Vec<F128>>(ret)}
 }
 
-// /// Splits v by bits, and computes 128 vectors sum_j bit(i, v[j])w[j]
-// /// Equivalently, treats first vector as 128 x l matrix, and second as l x 128 matrix,
-// /// and computes 128x128 product.
-// fn by_coord_product_naive(v: &[F128], w: &[F128]) -> Vec<F128> {
-//     assert!(v.len() == w.len());
-//     let mut ret = vec![F128::zero(); 128];
-//     for j in 0..v.len() {
-//         let bits = u128_to_bits(v[j].raw());
-//         for k in 0..128 {
-//             if bits[k] {ret[k] += w[j]}
-//         }
-//     }
-//     ret
-// }
+#[unroll::unroll_for_loops]
+const fn drop_top_bit(x: usize) -> (usize, usize) {
+    let mut s = 0;
+    for i in 0..8 {
+        let bit = (x >> i) % 2;
+        s = i * bit + s * (1 - bit);
+    }
+    (x - (1 << s), s)
+}
 
-// #[unroll::unroll_for_loops]
-// unsafe fn by_coord_product_nobits(v: &[F128], w: &[F128]) -> Vec<F128> {
-//     assert!(v.len() == w.len());
-//     let mut ret = vec![F128::zero(); 128];
-//     for j in 0..v.len() {
-//         let bytes: [u8; 16] = transmute::<F128, [u8; 16]>(v[j]);
-//         for k in 0..16 {
-//             for s in 0..8 {
-//                 if (bytes[k] >> s) % 2 != 0 {ret[k] += w[j]}
-//             }
-//         }
-//     }
-//     ret
-// }
+#[unroll::unroll_for_loops]
+pub fn restrict2(poly: Vec<F128>, coords: &[F128], dims: usize) -> Vec<Vec<F128>> {
+    assert!(poly.len() == 1 << dims);
+    assert!(coords.len() <= dims);
 
-// #[unroll::unroll_for_loops]
-// unsafe fn by_coord_product_nobranch(v: &[F128], w: &[F128]) -> Vec<F128> {
-//     assert!(v.len() == w.len());
-//     let mut ret : Vec<u128> = vec![0; 128];
-//     let mut ret = transmute::<_, Vec<__m128i>>(ret);
-//     for j in 0..v.len() {
-//         let bytes: [u8; 16] = transmute::<F128, [u8; 16]>(v[j]);
-//         for k in 0..16 {
-//             let byte = bytes[k];
-//             for s in 0..8 {
-//                 let control = 0u128.wrapping_sub(((byte >> s) % 2) as u128);
-//                 ret[k] = _mm_xor_si128(ret[k], _mm_and_si128(transmute::<F128, __m128i>(w[j]), transmute(control)));
-//             }
-//         }
-//     }
-//     transmute(ret)
-// }
+    let chunk_size = 1 << coords.len();
+    let num_chunks = 1 << (dims - coords.len());
 
-// fn _by_coord_product_4_ru (v: &[F128], w: &[F128]) -> Vec<F128> {
-//     let mut target = vec![F128::zero(); 128];
-//     by_coord_product_4_ru(v, w, &mut target.iter_mut().collect_vec());
-//     target
-// }
+    let eq = eq_poly(coords);
 
-// //#[unroll::unroll_for_loops]
-// fn by_coord_product_4_ru(v: &[F128], w: &[F128], target: &mut [&mut F128]) {
-// unsafe{
-//     let target = transmute::<_, &mut [&mut u128]>(target);
-    
-//     let mut j = 0;
-//     loop {
-//         let chunk = transmute::<&[F128], &[[u8; 16]]>(&v[j .. j + 16]);
+    assert!(eq.len() % 16 == 0, "Technical condition for now.");
 
-//         let mut xortable = [MaybeUninit::<u128>::uninit(); 16];        
-//         xortable[0b0000] = transmute(0u128);
-//         xortable[0b0001] = transmute(w[j]);
-//         xortable[0b0010] = transmute(w[j + 1]);
-//         xortable[0b0100] = transmute(w[j + 2]);
-//         xortable[0b1000] = transmute(w[j + 3]);
-//         xortable[0b0011] = transmute(xortable[0b0001].assume_init() ^ xortable[0b0010].assume_init());
-//         xortable[0b0101] = transmute(xortable[0b0100].assume_init() ^ xortable[0b0001].assume_init());
-//         xortable[0b0110] = transmute(xortable[0b0100].assume_init() ^ xortable[0b0010].assume_init());
-//         xortable[0b0111] = transmute(xortable[0b0101].assume_init() ^ xortable[0b0010].assume_init());
-//         xortable[0b1001] = transmute(xortable[0b1000].assume_init() ^ xortable[0b0001].assume_init());
-//         xortable[0b1010] = transmute(xortable[0b1000].assume_init() ^ xortable[0b0010].assume_init());
-//         xortable[0b1011] = transmute(xortable[0b1000].assume_init() ^ xortable[0b0011].assume_init());
-//         xortable[0b1100] = transmute(xortable[0b1000].assume_init() ^ xortable[0b0100].assume_init());
-//         xortable[0b1101] = transmute(xortable[0b1000].assume_init() ^ xortable[0b0101].assume_init());
-//         xortable[0b1110] = transmute(xortable[0b1000].assume_init() ^ xortable[0b0110].assume_init());
-//         xortable[0b1111] = transmute(xortable[0b1000].assume_init() ^ xortable[0b0111].assume_init());
-//         let xortable : [u128; 16] = transmute(xortable);
+    let mut eq_sums = Vec::with_capacity(256 * eq.len() / 8);
 
-//         let mut xortable2 = [MaybeUninit::<u128>::uninit(); 16];        
-//         xortable2[0b0000] = transmute(0u128);
-//         xortable2[0b0001] = transmute(w[j + 4]);
-//         xortable2[0b0010] = transmute(w[j + 5]);
-//         xortable2[0b0100] = transmute(w[j + 6]);
-//         xortable2[0b1000] = transmute(w[j + 7]);
-//         xortable2[0b0011] = transmute(xortable2[0b0001].assume_init() ^ xortable2[0b0010].assume_init());
-//         xortable2[0b0101] = transmute(xortable2[0b0100].assume_init() ^ xortable2[0b0001].assume_init());
-//         xortable2[0b0110] = transmute(xortable2[0b0100].assume_init() ^ xortable2[0b0010].assume_init());
-//         xortable2[0b0111] = transmute(xortable2[0b0101].assume_init() ^ xortable2[0b0010].assume_init());
-//         xortable2[0b1001] = transmute(xortable2[0b1000].assume_init() ^ xortable2[0b0001].assume_init());
-//         xortable2[0b1010] = transmute(xortable2[0b1000].assume_init() ^ xortable2[0b0010].assume_init());
-//         xortable2[0b1011] = transmute(xortable2[0b1000].assume_init() ^ xortable2[0b0011].assume_init());
-//         xortable2[0b1100] = transmute(xortable2[0b1000].assume_init() ^ xortable2[0b0100].assume_init());
-//         xortable2[0b1101] = transmute(xortable2[0b1000].assume_init() ^ xortable2[0b0101].assume_init());
-//         xortable2[0b1110] = transmute(xortable2[0b1000].assume_init() ^ xortable2[0b0110].assume_init());
-//         xortable2[0b1111] = transmute(xortable2[0b1000].assume_init() ^ xortable2[0b0111].assume_init());
-//         let xortable2 : [u128; 16] = transmute(xortable2);
+    for i in 0..eq.len()/8 {
+        eq_sums.push(F128::zero());
+        for j in 1..256 {
+            let (sum_idx, eq_idx) = drop_top_bit(j);
+            let tmp = eq[i * 8 + eq_idx] + eq_sums[i * 256 + sum_idx];
+            eq_sums.push(tmp);
+        }
+    }
 
-//         let mut xortable3 = [MaybeUninit::<u128>::uninit(); 16];        
-//         xortable3[0b0000] = transmute(0u128);
-//         xortable3[0b0001] = transmute(w[j + 8]);
-//         xortable3[0b0010] = transmute(w[j + 9]);
-//         xortable3[0b0100] = transmute(w[j + 10]);
-//         xortable3[0b1000] = transmute(w[j + 11]);
-//         xortable3[0b0011] = transmute(xortable3[0b0001].assume_init() ^ xortable3[0b0010].assume_init());
-//         xortable3[0b0101] = transmute(xortable3[0b0100].assume_init() ^ xortable3[0b0001].assume_init());
-//         xortable3[0b0110] = transmute(xortable3[0b0100].assume_init() ^ xortable3[0b0010].assume_init());
-//         xortable3[0b0111] = transmute(xortable3[0b0101].assume_init() ^ xortable3[0b0010].assume_init());
-//         xortable3[0b1001] = transmute(xortable3[0b1000].assume_init() ^ xortable3[0b0001].assume_init());
-//         xortable3[0b1010] = transmute(xortable3[0b1000].assume_init() ^ xortable3[0b0010].assume_init());
-//         xortable3[0b1011] = transmute(xortable3[0b1000].assume_init() ^ xortable3[0b0011].assume_init());
-//         xortable3[0b1100] = transmute(xortable3[0b1000].assume_init() ^ xortable3[0b0100].assume_init());
-//         xortable3[0b1101] = transmute(xortable3[0b1000].assume_init() ^ xortable3[0b0101].assume_init());
-//         xortable3[0b1110] = transmute(xortable3[0b1000].assume_init() ^ xortable3[0b0110].assume_init());
-//         xortable3[0b1111] = transmute(xortable3[0b1000].assume_init() ^ xortable3[0b0111].assume_init());
-//         let xortable3 : [u128; 16] = transmute(xortable3);
+    let poly : &[F128] = & poly;
 
-//         let mut xortable4 = [MaybeUninit::<u128>::uninit(); 16];        
-//         xortable4[0b0000] = transmute(0u128);
-//         xortable4[0b0001] = transmute(w[j + 12]);
-//         xortable4[0b0010] = transmute(w[j + 13]);
-//         xortable4[0b0100] = transmute(w[j + 14]);
-//         xortable4[0b1000] = transmute(w[j + 15]);
-//         xortable4[0b0011] = transmute(xortable4[0b0001].assume_init() ^ xortable4[0b0010].assume_init());
-//         xortable4[0b0101] = transmute(xortable4[0b0100].assume_init() ^ xortable4[0b0001].assume_init());
-//         xortable4[0b0110] = transmute(xortable4[0b0100].assume_init() ^ xortable4[0b0010].assume_init());
-//         xortable4[0b0111] = transmute(xortable4[0b0101].assume_init() ^ xortable4[0b0010].assume_init());
-//         xortable4[0b1001] = transmute(xortable4[0b1000].assume_init() ^ xortable4[0b0001].assume_init());
-//         xortable4[0b1010] = transmute(xortable4[0b1000].assume_init() ^ xortable4[0b0010].assume_init());
-//         xortable4[0b1011] = transmute(xortable4[0b1000].assume_init() ^ xortable4[0b0011].assume_init());
-//         xortable4[0b1100] = transmute(xortable4[0b1000].assume_init() ^ xortable4[0b0100].assume_init());
-//         xortable4[0b1101] = transmute(xortable4[0b1000].assume_init() ^ xortable4[0b0101].assume_init());
-//         xortable4[0b1110] = transmute(xortable4[0b1000].assume_init() ^ xortable4[0b0110].assume_init());
-//         xortable4[0b1111] = transmute(xortable4[0b1000].assume_init() ^ xortable4[0b0111].assume_init());
-//         let xortable4 : [u128; 16] = transmute(xortable4);
+    let mut ret = vec![vec![F128::zero(); num_chunks]; 128];
 
-//         for k in 0..16 {
-//             let mut x = transmute::<_, __m128i>(
-//                 [chunk[15][k], chunk[14][k], chunk[13][k], chunk[12][k], chunk[11][k], chunk[10][k], chunk[9][k], chunk[8][k],
-//                      chunk[7][k], chunk[6][k], chunk[5][k], chunk[4][k], chunk[3][k], chunk[2][k], chunk[1][k], chunk[0][k],]
-//             );
-//             for s in 0..8 {
-//                 let addr = _mm_movemask_epi8(x);
-//                 *target[k] ^= xortable[(addr & 15) as usize];
-//                 *target[k] ^= xortable2[((addr >> 4) & 15) as usize];
-//                 *target[k] ^= xortable3[((addr >> 8) & 15) as usize];
-//                 *target[k] ^= xortable4[(addr >> 12) as usize];
-                
-//                 x = _mm_slli_epi64(x,1);
-//             }
-//         };
-        
-//         j += 16;
-//         if j >= v.len() {
-//             break;
-//         }
-//     }
-// }
-// }
+    for i in 0 .. num_chunks {
+        for j in 0 .. eq.len() / 16 { // Step by 16 
+            let v0 = &eq_sums[j * 512 .. j * 512 + 256];
+            let v1 = &eq_sums[j * 512 + 256 .. j * 512 + 512];
+            let bytearr = unsafe{ transmute::<&[F128], &[[u8; 16]]>(
+                &poly[i * chunk_size + j * 16 .. i * chunk_size + (j + 1) * 16]
+            ) };
+
+            // Iteration over bytes
+            for s in 0..16 {
+                let mut t = [
+                    bytearr[0][s], bytearr[1][s], bytearr[2][s], bytearr[3][s],
+                    bytearr[4][s], bytearr[5][s], bytearr[6][s], bytearr[7][s],
+                    bytearr[8][s], bytearr[9][s], bytearr[10][s], bytearr[11][s],
+                    bytearr[12][s], bytearr[13][s], bytearr[14][s], bytearr[15][s],
+                ];
+ 
+                for u in 0..8 {
+                    let bits = v_movemask_epi8(t) as u16;
+
+                    ret[s*8 + 7 - u][i] += v0[(bits & 255) as usize];
+                    ret[s*8 + 7 - u][i] += v1[((bits >> 8) & 255) as usize];
+                    t = v_slli_epi64::<1>(t);
+                }
+            }
+
+        }
+    }
+
+    ret
+}
 
 /// This function takes a F128-valued polynomial P, and computes restrictions of
 /// its F2-valued coordinates P_i = pi_i(P) - i.e. it returns 128 polynomials
@@ -340,9 +277,6 @@ pub fn restrict(mut poly: Vec<F128>, coords: &[F128], dims: usize) -> Vec<Vec<F1
 
     ret
 }
-
-
-
 
 pub struct AndcheckProver {
     pt: Vec<F128>,
@@ -585,8 +519,8 @@ impl AndcheckProver {
             let _ = self.p_q_ext.take(); // it is useless now
             let p = self.p.take().unwrap(); // and these now will turn into p_i-s and q_is
             let q = self.q.take().unwrap();
-            self.p_coords = Some(restrict(p, &self.challenges, num_vars));
-            self.q_coords = Some(restrict(q, &self.challenges, num_vars));
+            self.p_coords = Some(restrict2(p, &self.challenges, num_vars));
+            self.q_coords = Some(restrict2(q, &self.challenges, num_vars));
             // TODO: we can avoid recomputing eq-s throughout the protocol in multiple places, including restrict
         }
 
@@ -733,54 +667,10 @@ mod tests {
         }
     }
 
-    // #[test]
-    // fn bitprod() {
-    //     let rng = &mut OsRng;
-    //     let mut a = F128::rand(rng);
-    //     let mut b = F128::rand(rng);
-    //     let mut v = vec![];
-    //     let mut w = vec![];
-    //     for i in 0..(1 << 19) {
-    //         v.push(a);
-    //         w.push(b);
-    //         a *= a;
-    //         b *= b;
-    //     }
-
-    //     let start = Instant::now();
-    //     let p = by_coord_product_naive(&v, &w);
-    //     let end = Instant::now();
-
-    //     println!("Naive prod took {} ms", (end - start).as_millis());
-
-    //     let start = Instant::now();
-    //     let q = unsafe{by_coord_product_nobits(&v, &w)};
-    //     let end = Instant::now();
-
-    //     println!("Nobits prod took {} ms", (end - start).as_millis());
-
-    //     let start = Instant::now();
-    //     let r = unsafe{by_coord_product_nobranch(&v, &w)};
-    //     let end = Instant::now();
-
-    //     println!("Nobranch prod took {} ms", (end - start).as_millis());
-
-    //     let start = Instant::now();
-    //     let s = _by_coord_product_4_ru(&v, &w);
-    //     let end = Instant::now();
-
-    //     println!("Nobranch 4 russians prod took {} ms", (end - start).as_millis());
-
-    //     assert_eq!(p, q);
-    //     assert_eq!(q, r);
-    //     assert_eq!(r, s)
-
-    // }
-
     #[test]
     fn verify_prover() {
         let rng = &mut OsRng;
-        let num_vars = 18;
+        let num_vars = 20;
 
         let pt : Vec<_> = repeat_with(|| F128::rand(rng)).take(num_vars).collect();
         let p : Vec<_> = repeat_with(|| F128::rand(rng)).take(1 << num_vars).collect();
@@ -790,12 +680,14 @@ mod tests {
         //let evaluation_claim = evaluate(&p_zip_q, &pt);
         let evaluation_claim = p_zip_q.iter().zip(eq_poly(&pt).iter()).fold(F128::zero(), |acc, (x, y)|acc + *x * *y);
 
+        let phase_switch = 5;
+
         let start = Instant::now();
 
-        let mut prover = AndcheckProver::new(pt, p, q, evaluation_claim, 5,false);
+        let mut prover = AndcheckProver::new(pt, p, q, evaluation_claim, phase_switch,false);
 
         for i in 0..num_vars {
-            println!("Entering round {}, phase {}", i, if i <= 5 {1} else {2});
+            println!("Entering round {}, phase {}", i, if i <= phase_switch {1} else {2});
             let start = Instant::now();
             let round_challenge = F128::rand(rng);
             prover.round(round_challenge);
@@ -812,5 +704,11 @@ mod tests {
         let end = Instant::now();
 
         println!("Time elapsed: {}", (end - start).as_millis());
+    }
+
+    #[test]
+    fn movemask_where_bits_go() {
+        let a : [u8; 16] = [0xFF, 0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF, 0xFF,0xFF,0xFF,0x00];
+        println!("{:#032b}", v_movemask_epi8(a));
     }
 }
