@@ -5,7 +5,7 @@ use rand::Rng;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct F128 {
-    raw: u128,
+    pub(crate) raw: u128,
 }
 
 impl F128 {
