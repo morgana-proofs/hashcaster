@@ -2,7 +2,7 @@ use std::{mem::{transmute, MaybeUninit}, time::Instant};
 
 use num_traits::{One, Pow, Zero};
 use rand::{rngs::OsRng, RngCore};
-use rayon::iter::{IndexedParallelIterator, IntoParallelRefIterator, IntoParallelRefMutIterator, ParallelIterator};
+use rayon::iter::{IndexedParallelIterator, IntoParallelIterator, IntoParallelRefIterator, IntoParallelRefMutIterator, ParallelIterator};
 use crate::{backend::autodetect::{v_movemask_epi8, v_slli_epi64}, field::{pi, F128}, parallelize::parallelize, utils::u128_to_bits};
 use itertools::Itertools;
 
@@ -195,7 +195,7 @@ pub fn restrict2(poly: Vec<F128>, coords: &[F128], dims: usize) -> Vec<Vec<F128>
     assert!(poly.len() == 1 << dims);
     assert!(coords.len() <= dims);
 
-    let chunk_size = 1 << coords.len();
+    let chunk_size = (1 << coords.len());
     let num_chunks = 1 << (dims - coords.len());
 
     let eq = eq_poly(coords);
@@ -216,8 +216,11 @@ pub fn restrict2(poly: Vec<F128>, coords: &[F128], dims: usize) -> Vec<Vec<F128>
     let poly : &[F128] = & poly;
 
     let mut ret = vec![vec![F128::zero(); num_chunks]; 128];
+    let ret_ptrs : [usize; 128] = ret.iter_mut().map(|v| unsafe{
+        transmute::<*mut F128, usize>((*v).as_mut_ptr()) // This is extremely ugly.  
+    }).collect_vec().try_into().unwrap();
 
-    for i in 0 .. num_chunks {
+    (0..num_chunks).into_par_iter().map(move |i| {
         for j in 0 .. eq.len() / 16 { // Step by 16 
             let v0 = &eq_sums[j * 512 .. j * 512 + 256];
             let v1 = &eq_sums[j * 512 + 256 .. j * 512 + 512];
@@ -237,14 +240,18 @@ pub fn restrict2(poly: Vec<F128>, coords: &[F128], dims: usize) -> Vec<Vec<F128>
                 for u in 0..8 {
                     let bits = v_movemask_epi8(t) as u16;
 
-                    ret[s*8 + 7 - u][i] += v0[(bits & 255) as usize];
-                    ret[s*8 + 7 - u][i] += v1[((bits >> 8) & 255) as usize];
+                    unsafe{
+                        let ret_ptrs = transmute::<[usize; 128], [*mut F128; 128]>(ret_ptrs);
+                        * ret_ptrs[s*8 + 7 - u].offset(i as isize) += v0[(bits & 255) as usize];
+                        * ret_ptrs[s*8 + 7 - u].offset(i as isize) += v1[((bits >> 8) & 255) as usize];
+                    }
                     t = v_slli_epi64::<1>(t);
                 }
             }
 
         }
     }
+    ).count();
 
     ret
 }
