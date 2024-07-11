@@ -1,3 +1,5 @@
+use std::mem::transmute;
+
 #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
 use super::x86 as stuff;
 

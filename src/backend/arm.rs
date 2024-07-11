@@ -1,4 +1,6 @@
-use std::{mem::transmute, arch::aarch64::{uint8x16_t, veorq_u8, vextq_u8, vmull_p64, vgetq_lane_u64, vreinterpretq_u64_u8, vreinterpretq_u8_p128}};
+use std::{mem::transmute, arch::aarch64::{uint8x16_t, veorq_u8, vextq_u8, vmull_p64, vgetq_lane_u64, vreinterpretq_u64_u8, vreinterpretq_u8_p128, vld1q_s8, vandq_u8, vdupq_n_u8, vshlq_u8, vaddv_u8, vget_low_u8, vget_high_u8, vld1q_u8}, time::Instant};
+
+use rand::{rngs::OsRng, RngCore};
 
 
 pub fn mul_128(x: u128, y:u128) -> u128{
@@ -104,4 +106,116 @@ unsafe fn mont_reduce(x23: uint8x16_t, x01: uint8x16_t) -> uint8x16_t {
     let b = veorq_u8(x01, vextq_u8(a, a, 8));
     let c = pmull2(b, poly);
     veorq_u8(x23, veorq_u8(c, b))
+}
+
+#[unroll::unroll_for_loops]
+fn mm_movemask_epi8(bytes: [u8; 16]) -> u16 {
+    let mut mask = 0u16;
+    for (i, &byte) in bytes.iter().enumerate() {
+        mask |= ((byte & 0x80) as u16 >> 7) << i;
+    }
+    mask
+}
+#[unroll::unroll_for_loops]
+pub fn cpu_v_movemask_epi8(x: [u8; 16]) -> i32 {
+    let mut ret = 0;
+    for i in 0..16 {
+        ret <<= 1;
+        ret += (x[15-i] >> 7) as i32;
+    }
+    ret
+}
+
+
+pub(crate) fn v_movemask_epi8(input: uint8x16_t) -> i32 {
+    let uc_shift: [i8; 16] = [-7, -6, -5, -4, -3, -2, -1, 0, -7, -6, -5, -4, -3, -2, -1, 0];
+    let vshift = unsafe { vld1q_s8(uc_shift.as_ptr()) };
+
+    let vmask = unsafe { vandq_u8(input, vdupq_n_u8(0x80)) };
+    let shifted_mask = unsafe { vshlq_u8(vmask, vshift) };
+
+    let lower_sum = unsafe { vaddv_u8(vget_low_u8(shifted_mask)) } as u32;
+    let higher_sum = unsafe { vaddv_u8(vget_high_u8(shifted_mask)) } as u32;
+
+    unsafe { transmute(lower_sum + (higher_sum << 8)) } 
+}
+
+#[test]
+fn bench_movemask() {
+    unsafe{
+        let rng = &mut OsRng;
+        use crate::utils::u128_rand;
+        let s = u128_rand(rng);
+        let x = rng.next_u32() as i32;
+
+        let n = 100_000_000usize;
+        let mut u = x;
+        let mut v = s;
+
+        let mut ret = 0;
+
+        let label0 = Instant::now();
+
+        for i in 0..n {
+            v += s;
+            u *= x;
+            u += 1;
+        }
+        ret += u;
+
+        let label1 = Instant::now();
+
+        for i in 0..n {
+            v += s;
+            u *= v_movemask_epi8(transmute(v));
+            u += 1;
+        }
+
+        ret += u;
+
+        let label2 = Instant::now();
+
+        for i in 0..n {
+            v += s;
+            u *= cpu_v_movemask_epi8(transmute(v));
+            u += 1;
+        }
+        
+        ret += u;
+
+        let label3 = Instant::now();
+
+        println!(
+            "Native: {} ms\nReference: {} ms\nOffset (must be greater than zero or this thing is lying) {} ms", 
+            ((label3 - label2)).as_millis(),
+            ((label2 - label1)).as_millis(),
+            (label1 - label0).as_millis(),
+        );
+
+        println!("{}", ret);
+    }
+}
+
+#[test]
+fn test_for_mm_movemask_aarch64() {
+    let bytes: [u8; 16] = [
+        0x80, 0x01, 0x80, 0x01, 0x80, 0x01, 0x80, 0x01,
+        0x80, 0x01, 0x80, 0x01, 0x80, 0x01, 0x80, 0x01,
+    ];
+    let input_vector = unsafe { vld1q_u8(bytes.as_ptr()) };
+    let start = Instant::now();
+    let result = v_movemask_epi8(input_vector);
+    let end = Instant::now();
+    println!("Olen2a {} nanos", (end - start).as_nanos());
+
+    let start = Instant::now();
+    let mask = mm_movemask_epi8(bytes);
+    let end = Instant::now();
+    println!("Olena {} nanos", (end - start).as_nanos());
+
+    let start = Instant::now();
+    let lev_mask = cpu_v_movemask_epi8(bytes);
+    let end = Instant::now();
+    println!("Lev {} nanos", (end - start).as_nanos());
+
 }
