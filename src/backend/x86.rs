@@ -1,4 +1,4 @@
-use std::{arch::x86_64::{__m128i, _mm_clmulepi64_si128, _mm_shuffle_epi32, _mm_slli_epi64, _mm_srli_epi64, _mm_unpacklo_epi64, _mm_xor_si128}, mem::transmute};
+use std::{arch::x86_64::{__m128i, _mm_clmulepi64_si128, _mm_movemask_epi8, _mm_shuffle_epi32, _mm_slli_epi64, _mm_srli_epi64, _mm_unpacklo_epi64, _mm_xor_si128}, mem::transmute};
 
 // Using polyval impl from rust-crypto as a reference.
 // I also use this as opportunity to learn about x86 instructions.
@@ -74,4 +74,9 @@ unsafe fn xor5(e1: __m128i, e2: __m128i, e3: __m128i, e4: __m128i, e5: __m128i) 
         e1,
         _mm_xor_si128(_mm_xor_si128(e2, e3), _mm_xor_si128(e4, e5)),
     )
+}
+
+#[inline(always)]
+pub unsafe fn v_movemask_epi8(x: [u8; 16]) -> i32 {
+    _mm_movemask_epi8(transmute(x))
 }
