@@ -462,14 +462,11 @@ impl AndcheckProver {
             self.evaluation_claim = poly_final[0] + poly_final[1] * round_challenge + poly_final[2] * r2 + poly_final[3] * r3;
             self.challenges.push(round_challenge);
 
-            let start = Instant::now();
             self.p_q_ext = Some(
                 p_q_ext.par_chunks(3).map(|chunk| {
                     chunk[0] + (chunk[0] + chunk[1] + chunk[2]) * round_challenge + chunk[2] * r2
                 }).collect()
             );
-            let end = Instant::now();
-            println!("Time spent on 3^(c+1) restriction: {} ms", (end-start).as_millis());
 
             ret = RoundResponse{values: poly_final};
         } else {
