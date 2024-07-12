@@ -26,7 +26,6 @@ pub fn eq_poly(pt: &[F128]) -> Vec<F128> {
 }
 
 pub fn eq_poly_sequence(pt: &[F128]) -> Vec<Vec<F128>> {
-    let start = Instant::now();
 
     let l = pt.len();
     let mut ret = Vec::with_capacity(l + 1);
@@ -48,10 +47,6 @@ pub fn eq_poly_sequence(pt: &[F128]) -> Vec<Vec<F128>> {
             ret.push(transmute::<Vec<MaybeUninit<F128>>, Vec<F128>>(incoming));
         }
     }
-
-    let end = Instant::now();
-
-    println!("eqseq: {} ms", (end-start).as_millis());
 
     ret
 }
