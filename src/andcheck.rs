@@ -1,10 +1,11 @@
-use std::{mem::{transmute, MaybeUninit}, time::Instant};
+use std::{mem::{transmute, MaybeUninit}, sync::atomic::{AtomicU64, Ordering}, time::Instant};
 
 use num_traits::{One, Pow, Zero};
 use rand::{rngs::OsRng, RngCore};
-use rayon::iter::{IndexedParallelIterator, IntoParallelIterator, IntoParallelRefIterator, IntoParallelRefMutIterator, ParallelIterator};
+use rayon::{iter::{IndexedParallelIterator, IntoParallelIterator, IntoParallelRefIterator, IntoParallelRefMutIterator, ParallelIterator}, slice::{ParallelSlice, ParallelSliceMut}};
 use crate::{backend::autodetect::{v_movemask_epi8, v_slli_epi64}, field::{pi, F128}, parallelize::parallelize, utils::u128_to_bits};
 use itertools::Itertools;
+
 
 pub fn eq_poly(pt: &[F128]) -> Vec<F128> {
     let l = pt.len();
@@ -23,6 +24,38 @@ pub fn eq_poly(pt: &[F128]) -> Vec<F128> {
     }
     ret
 }
+
+pub fn eq_poly_sequence(pt: &[F128]) -> Vec<Vec<F128>> {
+    let start = Instant::now();
+
+    let l = pt.len();
+    let mut ret = Vec::with_capacity(l + 1);
+    ret.push(vec![F128::one()]);
+
+    for i in 1..(l+1) {
+        let last = &ret[i-1];
+        let multiplier = pt[l-i];
+        let mut incoming = vec![MaybeUninit::<F128>::uninit(); 1 << i];
+        unsafe{
+        let ptr = transmute::<*mut MaybeUninit<F128>, usize>(incoming.as_mut_ptr());
+            (0 .. 1 << (i-1)).into_par_iter().map(|j|{
+                let ptr = transmute::<usize, *mut MaybeUninit<F128>>(ptr);
+                let w = last[j];
+                let m = multiplier * w;
+                *ptr.offset(2*j as isize) = MaybeUninit::new(w + m);
+                *ptr.offset((2*j + 1) as isize) = MaybeUninit::new(m);
+            }).count();
+            ret.push(transmute::<Vec<MaybeUninit<F128>>, Vec<F128>>(incoming));
+        }
+    }
+
+    let end = Instant::now();
+
+    println!("eqseq: {} ms", (end-start).as_millis());
+
+    ret
+}
+
 
 pub fn eq_ev(x: &[F128], y: &[F128]) -> F128 {
     x.iter().zip_eq(y.iter()).fold(F128::one(), |acc, (x, y)| acc * (F128::one() + x + y))
@@ -49,12 +82,13 @@ fn compute_trit_mappings(c: usize)  -> (Vec<u16>, Vec<u16>) {
     let pow3 = 3usize.pow((c+1) as u32);
     
     let mut trits = vec![0u8; c + 1];
-    let mut bits_mapping = vec![0u16; 1 << (c + 1)];
-    let mut trits_mapping = vec![0u16; pow3];
+
+    let mut bit_mapping = Vec::<u16>::with_capacity(1 << (c + 1));
+    let mut trit_mapping = Vec::<u16>::with_capacity(pow3);
     
     let mut i = 0;
     loop {
-        let mut bin_value = 0;
+        let mut bin_value = 0u16;
         let mut j = c;
         let mut flag = true;
         let mut bad_offset = 1u16;
@@ -66,16 +100,17 @@ fn compute_trit_mappings(c: usize)  -> (Vec<u16>, Vec<u16>) {
             if trits[j] == 2 {
                 flag = false;
             } else {
-                bin_value += trits[j] as usize;
+                bin_value += trits[j] as u16;
             }
 
             if j == 0 {break}
             j -= 1;
         }
         if flag {
-            bits_mapping[bin_value] = i as u16;
+            trit_mapping.push(bin_value << 1);
+            bit_mapping.push(i as u16);
         } else {
-            trits_mapping[i] = pow3 as u16 / bad_offset;
+            trit_mapping.push(pow3 as u16 / bad_offset);
         }
 
         i += 1;
@@ -97,86 +132,88 @@ fn compute_trit_mappings(c: usize)  -> (Vec<u16>, Vec<u16>) {
         }
     }
 
-    (bits_mapping, trits_mapping)
+    (bit_mapping, trit_mapping)
 }
-
-
-pub fn extend_table2(table: &[F128], dims: usize, c: usize) -> Vec<F128> {
-    assert!(table.len() == 1 << dims);
-    assert!(c < dims);
-    let mut target = vec![MaybeUninit::uninit(); 3usize.pow((c + 1) as u32) << (dims - c - 1)];
-    unsafe {
-        _extend_table2(table, &mut target);
-        transmute(target)
-    }
-}
-
-unsafe fn _extend_table2(table: &[F128], target: &mut[MaybeUninit<F128>]) {
-    if target.len() == table.len() {
-        target.copy_from_slice(transmute(table));
-        return
-    }
-    let a = table.len() / 2;
-    let b = target.len() / 3;
-    let (t0, t1) = table.split_at(a);
-    let (s0, tmp) = target.split_at_mut(b);
-    let (s1, s2) = tmp.split_at_mut(b);
-
-    _extend_table2(t0, s0);
-    _extend_table2(t1, s1);
-
-    s0.par_iter().zip(s1.par_iter()).zip(s2.par_iter_mut())
-        .map(|((x, y), z)| *z = MaybeUninit::new(x.assume_init() + y.assume_init())).count();
-}
-
-
 
 /// Makes table 3^{c+1} * 2^{dims - c - 1}
-pub fn extend_table(table: &[F128], dims: usize, c: usize) -> Vec<F128> {
-    // TODO: suggest adding parallelization only on 2^k layer, as this algo for extension doesn't work well in parallel
-    
+fn extend_table(table: &[F128], dims: usize, c: usize, trits_mapping: &[u16]) -> Vec<F128> {
     assert!(table.len() == 1 << dims);
     assert!(c < dims);
     let pow3 = 3usize.pow((c + 1) as u32);
-    assert!(pow3 < (u16::MAX) as usize, "This is too large anyway ;)");
+    assert!(pow3 < (1 << 15) as usize, "This is too large anyway ;)");
     let pow2 = 2usize.pow((dims - c - 1) as u32);
-
-    let (bits_mapping, trits_mapping) = compute_trit_mappings(c);
-
     let mut ret = vec![MaybeUninit::uninit(); pow3 * pow2];
-    for i in 0..(1 << dims) {
-        let hi = i >> (c + 1);
-        let lo = i ^ (hi << (c + 1));
-        let j = bits_mapping[lo] as usize + hi * pow3;
-        ret[j] = MaybeUninit::new(table[i]);
-    }
-
-    let mut task_size = pow3;
-    let mut d = 0;
-    while (task_size < pow3 * pow2) && (task_size < 500) {
-        task_size <<= 1;
-        d += 1;
-    }
-
-    parallelize(|chunk, i_offset| {
-        for q in 0 .. 1 << d {
+    unsafe{
+        table.par_chunks(1 << (c + 1)).zip(
+        ret.par_chunks_mut(pow3)).map(|(table_chunk, ret_chunk)| {
             for j in 0..pow3 {
-                let offset = trits_mapping[j] as usize;
-                //let i = (q as usize) + (i_offset >> d);
-                // actual index: j + i * pow3
-                let idx = (q as usize) * pow3 + j as usize;
-                
-                if offset != 0 {
-                    unsafe{
-                        chunk[idx] = MaybeUninit::new(chunk[idx - offset].assume_init() + chunk[idx - 2*offset].assume_init());// set it 0 and 1, add values
-                    }
+                let offset = trits_mapping[j];
+                if offset % 2 == 0 {
+                    ret_chunk[j] = MaybeUninit::new(table_chunk[(offset >> 1) as usize]);
+                } else {
+                    ret_chunk[j] = MaybeUninit::new(
+                        ret_chunk[j - offset as usize].assume_init()
+                        + ret_chunk[j - 2 * offset as usize].assume_init()
+                    );
                 }
+            }
+        }).count();
+    }
+    unsafe{transmute::<Vec<MaybeUninit<F128>>, Vec<F128>>(ret)}
+}
+
+/// Extends two tables at the same time and ANDs them
+/// Gives some advantage because we skip 1/3 of writes into p_ext and q_ext.
+fn extend_2_tables(p: &[F128], q: &[F128], dims: usize, c: usize, trit_mapping: &[u16]) -> Vec<F128> {
+    assert!(p.len() == 1 << dims);
+    assert!(q.len() == 1 << dims);
+    assert!(c < dims);
+    let pow3 = 3usize.pow((c + 1) as u32);
+    let pow3_adj = pow3 / 3 * 2;
+    assert!(pow3 < (1 << 15) as usize, "This is too large anyway ;)");
+    let pow2 = 2usize.pow((dims - c - 1) as u32);
+    let mut p_ext = vec![MaybeUninit::uninit(); (pow3 * 2) / 3  * pow2];
+    let mut q_ext = vec![MaybeUninit::uninit(); (pow3 * 2) / 3 * pow2];
+    let mut ret = vec![MaybeUninit::uninit(); pow3 * pow2];
+
+    // Slice management seems to have some small overhead at this scale, possibly replace with
+    // raw pointer accesses? *Insert look what they have to do to mimic the fraction of our power meme*
+    unsafe{
+        (p.par_chunks(1 << (c + 1)).zip(q.par_chunks(1 << (c + 1)))).zip(
+        p_ext.par_chunks_mut(pow3_adj).zip(q_ext.par_chunks_mut(pow3_adj))
+        ).zip(
+        ret.par_chunks_mut(pow3)).map(|(((p, q), (p_ext, q_ext)), ret)| {
+            for j in 0..pow3_adj {
+                let offset = trit_mapping[j] as usize;
+                if offset % 2 == 0 {
+                    p_ext[j] = MaybeUninit::new(
+                        p[offset >> 1]
+                    );
+                    q_ext[j] = MaybeUninit::new(
+                        q[offset >> 1]
+                    );
+                } else {
+                    p_ext[j] = MaybeUninit::new(
+                        p_ext[j - offset].assume_init()
+                        + p_ext[j - 2 * offset].assume_init()
+                    );
+                    q_ext[j] = MaybeUninit::new(
+                        q_ext[j - offset].assume_init()
+                        + q_ext[j - 2 * offset].assume_init()
+                    );
+                }
+                ret[j] = MaybeUninit::new(p_ext[j].assume_init() & q_ext[j].assume_init())
+
             };
-        }    
-    },
-    &mut ret,
-    task_size,
-    );
+            for j in pow3_adj..pow3{
+                let offset = trit_mapping[j] as usize;
+                ret[j] = MaybeUninit::new(
+                    (p_ext[j - offset].assume_init() + p_ext[j - 2 * offset].assume_init()) &
+                    (q_ext[j - offset].assume_init() + q_ext[j - 2 * offset].assume_init())
+                )
+            }
+        }).count();
+    }
     unsafe{transmute::<Vec<MaybeUninit<F128>>, Vec<F128>>(ret)}
 }
 
@@ -191,7 +228,7 @@ const fn drop_top_bit(x: usize) -> (usize, usize) {
 }
 
 #[unroll::unroll_for_loops]
-pub fn restrict2(poly: Vec<F128>, coords: &[F128], dims: usize) -> Vec<Vec<F128>> {
+pub fn restrict(poly: &[F128], coords: &[F128], dims: usize) -> Vec<Vec<F128>> {
     assert!(poly.len() == 1 << dims);
     assert!(coords.len() <= dims);
 
@@ -212,8 +249,6 @@ pub fn restrict2(poly: Vec<F128>, coords: &[F128], dims: usize) -> Vec<Vec<F128>
             eq_sums.push(tmp);
         }
     }
-
-    let poly : &[F128] = & poly;
 
     let mut ret = vec![vec![F128::zero(); num_chunks]; 128];
     let ret_ptrs : [usize; 128] = ret.iter_mut().map(|v| unsafe{
@@ -256,35 +291,6 @@ pub fn restrict2(poly: Vec<F128>, coords: &[F128], dims: usize) -> Vec<Vec<F128>
     ret
 }
 
-/// This function takes a F128-valued polynomial P, and computes restrictions of
-/// its F2-valued coordinates P_i = pi_i(P) - i.e. it returns 128 polynomials
-/// P_i(r0, ..., r_{j-1}, x_j, ..., x_{n-1})
-pub fn restrict(mut poly: Vec<F128>, coords: &[F128], dims: usize) -> Vec<Vec<F128>> {
-    // TODO: this (and matrixmult) should be optimized using hardware instructions
-    assert!(poly.len() == 1 << dims);
-    assert!(coords.len() <= dims);
-
-    let chunk_size = 1 << coords.len();
-    let num_chunks = 1 << (dims - coords.len());
-    let eq = eq_poly(coords);
-    let poly : &mut[F128] = &mut poly;
-
-    let mut ret = vec![vec![F128::zero(); num_chunks]; 128];
-
-    for i in 0..num_chunks { // This external cycle can be potentially parallelized
-        let chunk = &mut poly[i * chunk_size .. i * chunk_size + chunk_size];
-        // this is matrix 128 x chunk_size, which we multiply by eq_poly, treated as chunk_size x 128 matrix
-        for j in 0..chunk_size {
-            let bits = u128_to_bits(chunk[j].raw());
-            for k in 0..128 {
-                if bits[k] {ret[k][i] += eq[j]}
-            }
-        }
-    }
-
-    ret
-}
-
 pub struct AndcheckProver {
     pt: Vec<F128>,
     p: Option<Vec<F128>>,
@@ -298,6 +304,10 @@ pub struct AndcheckProver {
     c: usize, // PHASE SWITCH, round < c => PHASE 1.
     evaluation_claim: F128,
     challenges: Vec<F128>,
+
+    bits_to_trits_map: Vec<u16>,
+
+    eq_sequence: Vec<Vec<F128>>, // Precomputed eqs of all slices pt[i..].
 }
 
 pub struct RoundResponse {
@@ -340,14 +350,25 @@ impl AndcheckProver {
 
         // Represent values in (0, 1, \infty)^{c+1} (0, 1)^{n-c-1}
         
+        let (bit_mapping, trit_mapping) = compute_trit_mappings(phase_switch);
+
         let start = Instant::now();
-        let p_ext = extend_table(&p, pt.len(), phase_switch);
-        let q_ext = extend_table(&q, pt.len(), phase_switch);
-        let p_q_ext = p_ext.iter().zip_eq(q_ext.iter()).map(|(a, b)| *a & *b).collect();
+        // let p_ext = extend_table(&p, pt.len(), phase_switch, &trit_mapping);
+        // let q_ext = extend_table(&q, pt.len(), phase_switch, &trit_mapping);
+
+        // let label = Instant::now();
+        
+        // let p_q_ext = p_ext.par_iter().zip(q_ext.par_iter()).map(|(a, b)| *a & *b).collect();
+
+        let p_q_ext = extend_2_tables(&p, &q, pt.len(), phase_switch, &trit_mapping);
+
+        let eq_sequence = eq_poly_sequence(&pt[1..]); // We do not need whole eq, only partials. 
 
         let end = Instant::now();
 
-        println!("AndcheckProver::new time {} ms", (end-start).as_millis());
+        println!("AndcheckProver::new time {} ms",
+            (end-start).as_millis(),
+        );
 
         Self{
             pt,
@@ -358,7 +379,9 @@ impl AndcheckProver {
             q_coords: None,
             evaluation_claim,
             c: phase_switch,
-            challenges: vec![]
+            challenges: vec![],
+            bits_to_trits_map: bit_mapping,
+            eq_sequence,
         }
     }
 
@@ -389,21 +412,26 @@ impl AndcheckProver {
             // PHASE 1:
             let p_q_ext = self.p_q_ext.as_mut().unwrap();
 
-            let eq_evs = eq_poly(&pt_g); // eq(x, pt_{>})
-            let mut poly_deg_2 = vec![F128::zero(); 3]; //Evaluations in 0, 1 and \infty
+            let eq_evs = &self.eq_sequence[pt.len() - round - 1]; // eq(x, pt_{>})
             let phase1_dims = c - round;
             let pow3 = 3usize.pow(phase1_dims as u32);
-            
-            for i in 0..(1 << num_vars - c - 1) {
+
+            let mut poly_deg_2 =
+            (0 .. (1 << num_vars - c - 1)).into_par_iter().map(|i| {
+                let mut pd2_part = [F128::zero(), F128::zero(), F128::zero()];
                 for j in 0..(1 << phase1_dims) {
                     let index = (i << phase1_dims) + j;
-                    let trindex = i * pow3 + bits_to_trits(j);
+                    let offset = 3 * (i * pow3 + self.bits_to_trits_map[j] as usize);
                     let multiplier = eq_evs[index];
-                    poly_deg_2.iter_mut()
-                        .zip(p_q_ext[3*trindex .. 3*trindex + 3].iter())
-                        .map(|(a, b)| *a += *b * multiplier).count();
+                    pd2_part[0] += p_q_ext[offset] * multiplier;
+                    pd2_part[1] += p_q_ext[offset + 1] * multiplier;
+                    pd2_part[2] += p_q_ext[offset + 2] * multiplier;
                 }
-            }
+                pd2_part
+            }).reduce(||{[F128::zero(), F128::zero(), F128::zero()]}, |a, b|{
+                [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
+            });
+
 
             // Cast poly to coefficient form
             // For f(x) = a + bx + cx^2
@@ -438,34 +466,81 @@ impl AndcheckProver {
 
             self.evaluation_claim = poly_final[0] + poly_final[1] * round_challenge + poly_final[2] * r2 + poly_final[3] * r3;
             self.challenges.push(round_challenge);
-            self.p_q_ext = Some((0..(p_q_ext.len()/3)).map(|i| {
-                let chunk = &p_q_ext[3 * i .. 3 * i + 3];
-                chunk[0] + (chunk[0] + chunk[1] + chunk[2]) * round_challenge + chunk[2] * r2
-            }).collect());
+
+            let start = Instant::now();
+            self.p_q_ext = Some(
+                p_q_ext.par_chunks(3).map(|chunk| {
+                    chunk[0] + (chunk[0] + chunk[1] + chunk[2]) * round_challenge + chunk[2] * r2
+                }).collect()
+            );
+            let end = Instant::now();
+            println!("Time spent on 3^(c+1) restriction: {} ms", (end-start).as_millis());
 
             ret = RoundResponse{values: poly_final};
         } else {
-            let eq_evs = eq_poly(&pt_g);
+            let eq_evs = &self.eq_sequence[pt.len() - round - 1];
             let half = eq_evs.len();
 
             let p_coords = self.p_coords.as_mut().unwrap();
             let q_coords = self.q_coords.as_mut().unwrap();
 
 
-            let mut poly_deg_2 = vec![F128::zero(); 3]; // Actually, value in 1 is not necessary.
+            let poly_deg_2 : [AtomicU64; 6] = [0.into(), 0.into(), 0.into(), 0.into(), 0.into(), 0.into()];
 
-            for i in 0..half {
-                // This data layout sucks :(
-                poly_deg_2[0] += eq_evs[i] * ((0..128).map(|j| {
-                    F128::basis(j) * p_coords[j][2 * i] * q_coords[j][2 * i]
-                }).fold(F128::zero(), |a, b| a + b));
-                poly_deg_2[1] += eq_evs[i] * ((0..128).map(|j| {
-                    F128::basis(j) * p_coords[j][2 * i + 1] * q_coords[j][2 * i + 1]
-                }).fold(F128::zero(), |a, b| a + b));
-                poly_deg_2[2] += eq_evs[i] * ((0..128).map(|j| {
-                    F128::basis(j) * (p_coords[j][2 * i] + p_coords[j][2 * i + 1]) * (q_coords[j][2 * i] + q_coords[j][2 * i + 1])
-                }).fold(F128::zero(), |a, b| a + b));
+            // For some reason, version without atomics performs almost the same *and it seems even a bit worse*
+            // TODO: benchmark properly :)
+            // But for phase 1, usage of atomic degrades severely degrades perf ¯\_(ツ)_/¯
+
+            // let mut poly_deg_2 = 
+
+            // (0..half).into_par_iter().map(|i| {                
+            //     let mut pd2_part = [MaybeUninit::uninit(), MaybeUninit::uninit(), MaybeUninit::uninit()];
+
+            //     pd2_part[0] = MaybeUninit::new((eq_evs[i] * ((0..128).map(|j| {
+            //         F128::basis(j) * p_coords[j][2 * i] * q_coords[j][2 * i]
+            //     }).fold(F128::zero(), |a, b| a + b))));
+
+            //     pd2_part[1] = MaybeUninit::new(eq_evs[i] * ((0..128).map(|j| {
+            //         F128::basis(j) * p_coords[j][2 * i + 1] * q_coords[j][2 * i + 1]
+            //     }).fold(F128::zero(), |a, b| a + b)));
+
+            //     pd2_part[2] = MaybeUninit::new(eq_evs[i] * ((0..128).map(|j| {
+            //         F128::basis(j) * (p_coords[j][2 * i] + p_coords[j][2 * i + 1])
+            //         * (q_coords[j][2 * i] + q_coords[j][2 * i + 1])
+            //     }).fold(F128::zero(), |a, b| a + b)));
+
+            //     unsafe{ transmute::<[MaybeUninit<F128>; 3], [F128; 3]>(pd2_part)}
+            // }).reduce(||{[F128::zero(), F128::zero(), F128::zero()]}, |a, b|{
+            //     [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
+            // });
+
+            unsafe{
+                (0..half).into_par_iter().map(|i| {
+                    let a = transmute::<F128, [u64; 2]>(eq_evs[i] * ((0..128).map(|j| {
+                        F128::basis(j) * p_coords[j][2 * i] * q_coords[j][2 * i]
+                    }).fold(F128::zero(), |a, b| a + b)));
+
+                    poly_deg_2[0].fetch_xor(a[0], Ordering::Relaxed);
+                    poly_deg_2[1].fetch_xor(a[1], Ordering::Relaxed);
+
+                    let a = transmute::<F128, [u64; 2]>(eq_evs[i] * ((0..128).map(|j| {
+                        F128::basis(j) * p_coords[j][2 * i + 1] * q_coords[j][2 * i + 1]
+                    }).fold(F128::zero(), |a, b| a + b)));
+
+                    poly_deg_2[2].fetch_xor(a[0], Ordering::Relaxed);
+                    poly_deg_2[3].fetch_xor(a[1], Ordering::Relaxed);
+
+                    let a = transmute::<F128, [u64; 2]>(eq_evs[i] * ((0..128).map(|j| {
+                        F128::basis(j) * (p_coords[j][2 * i] + p_coords[j][2 * i + 1]) * (q_coords[j][2 * i] + q_coords[j][2 * i + 1])
+                    }).fold(F128::zero(), |a, b| a + b)));
+
+                    poly_deg_2[4].fetch_xor(a[0], Ordering::Relaxed);
+                    poly_deg_2[5].fetch_xor(a[1], Ordering::Relaxed);
+                }).count();
             }
+
+            let poly_deg_2 : [u64; 6] = poly_deg_2.iter().map(|x| x.load(Ordering::Relaxed)).collect_vec().try_into().unwrap();
+            let mut poly_deg_2 = unsafe{ transmute::<[u64; 6], [F128; 3]>(poly_deg_2) };
 
             let eq_y_multiplier = eq_ev(&self.challenges, &pt_l);
             poly_deg_2.iter_mut().map(|c| *c *= eq_y_multiplier).count();
@@ -500,7 +575,7 @@ impl AndcheckProver {
             self.challenges.push(round_challenge);
 
             // External iteration can be parallelized for early-ish rounds.
-            p_coords.iter_mut().map(|arr| {
+            p_coords.par_iter_mut().map(|arr| {
                 for j in 0..half {
                     arr[j] = arr[2 * j] + (arr[2 * j + 1] + arr[2 * j]) * round_challenge
                 };
@@ -508,7 +583,7 @@ impl AndcheckProver {
             }).count();
 
 
-            q_coords.iter_mut().map(|arr| {
+            q_coords.par_iter_mut().map(|arr| {
                 for j in 0..half {
                     arr[j] = arr[2 * j] + (arr[2 * j + 1] + arr[2 * j]) * round_challenge
                 };
@@ -526,8 +601,8 @@ impl AndcheckProver {
             let _ = self.p_q_ext.take(); // it is useless now
             let p = self.p.take().unwrap(); // and these now will turn into p_i-s and q_is
             let q = self.q.take().unwrap();
-            self.p_coords = Some(restrict2(p, &self.challenges, num_vars));
-            self.q_coords = Some(restrict2(q, &self.challenges, num_vars));
+            self.p_coords = Some(restrict(&p, &self.challenges, num_vars));
+            self.q_coords = Some(restrict(&q, &self.challenges, num_vars));
             // TODO: we can avoid recomputing eq-s throughout the protocol in multiple places, including restrict
         }
 
@@ -537,7 +612,6 @@ impl AndcheckProver {
 
     pub fn finish(&self) -> FinalClaim {
         assert!(self.curr_round() == self.num_vars(), "Protocol is not finished.");
-
 
         let mut inverse_orbit = vec![];
         let mut pt = self.challenges.clone();
@@ -608,23 +682,7 @@ mod tests {
 
         let x : Vec<_> = repeat_with(|| F128::rand(rng)).take(num_vars).collect();
         let y : Vec<_> = repeat_with(|| F128::rand(rng)).take(num_vars).collect();
-        
-
         assert!(eq_ev(&x, &y) == evaluate(&eq_poly(&x), &y));
-    }
-
-    #[test]
-    /// WARNING: THIS TEST WILL DO NOTHING AFTER WE SWITCH TO MAYBEUNINITS.
-    /// NOW IT CHECKS INTEGRITY
-    fn extend_table_collisions() {
-        let rng = &mut OsRng;
-        for i in 0..7 {
-            let table = repeat_with(|| F128::rand(rng)).take(1 << i).collect_vec();
-            for c in 0..i {
-                let ret = extend_table(&table, i, c);
-                assert!(ret.len() == 3usize.pow((c+1) as u32)*2usize.pow((i-c-1) as u32));
-            }
-        }
     }
 
     #[test]
@@ -667,7 +725,7 @@ mod tests {
             )
         }
 
-        let answer = restrict(poly, &pt[..num_vars_to_restrict], num_vars);
+        let answer = restrict(&poly, &pt[..num_vars_to_restrict], num_vars);
 
         for i in 0..128 {
             assert!(evaluate(&answer[i], &pt[num_vars_to_restrict..]) == evaluate(&poly_unzip[i], &pt));
@@ -710,12 +768,7 @@ mod tests {
 
         let end = Instant::now();
 
-        println!("Time elapsed: {}", (end - start).as_millis());
+        println!("Total time elapsed: {}", (end - start).as_millis());
     }
 
-    #[test]
-    fn movemask_where_bits_go() {
-        let a : [u8; 16] = [0xFF, 0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF, 0xFF,0xFF,0xFF,0x00];
-        println!("{:#032b}", v_movemask_epi8(a));
-    }
 }
