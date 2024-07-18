@@ -12,5 +12,5 @@ rayon = "1.10.0"
 unroll = "0.1.5"
 
 [features]
-default = ["parallel"]
 parallel = []
+default = ["parallel"]

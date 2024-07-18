@@ -1,4 +1,4 @@
-use std::{mem::{transmute, MaybeUninit}, sync::atomic::{AtomicU64, Ordering}, time::Instant};
+use std::{mem::{transmute, MaybeUninit}, sync::atomic::{AtomicU64, Ordering}, thread::sleep, time::{Duration, Instant}};
 
 use num_traits::{One, Pow, Zero};
 use rand::{rngs::OsRng, RngCore};
@@ -37,7 +37,14 @@ pub fn eq_poly_sequence(pt: &[F128]) -> Vec<Vec<F128>> {
         let mut incoming = vec![MaybeUninit::<F128>::uninit(); 1 << i];
         unsafe{
         let ptr = transmute::<*mut MaybeUninit<F128>, usize>(incoming.as_mut_ptr());
-            (0 .. 1 << (i-1)).into_par_iter().map(|j|{
+
+            #[cfg(not(feature = "parallel"))]
+            let iter = (0 .. (1 << (i-1))).into_iter();
+
+            #[cfg(feature = "parallel")]
+            let iter = (0 .. 1 << (i-1)).into_par_iter();
+
+            iter.map(|j|{
                 let ptr = transmute::<usize, *mut MaybeUninit<F128>>(ptr);
                 let w = last[j];
                 let m = multiplier * w;
@@ -139,8 +146,19 @@ fn extend_table(table: &[F128], dims: usize, c: usize, trits_mapping: &[u16]) ->
     let pow2 = 2usize.pow((dims - c - 1) as u32);
     let mut ret = vec![MaybeUninit::uninit(); pow3 * pow2];
     unsafe{
-        table.par_chunks(1 << (c + 1)).zip(
-        ret.par_chunks_mut(pow3)).map(|(table_chunk, ret_chunk)| {
+
+        #[cfg(feature = "parallel")]
+        let tchunks = table.par_chunks(1 << (c + 1));
+        #[cfg(feature = "parallel")]
+        let rchunks = ret.par_chunks_mut(pow3);
+
+        #[cfg(not(feature = "parallel"))]
+        let tchunks = table.chunks(1 << (c + 1));
+        #[cfg(not(feature = "parallel"))]
+        let rchunks = ret.chunks_mut(pow3);
+
+
+        tchunks.zip(rchunks).map(|(table_chunk, ret_chunk)| {
             for j in 0..pow3 {
                 let offset = trits_mapping[j];
                 if offset % 2 == 0 {
@@ -174,10 +192,34 @@ fn extend_2_tables(p: &[F128], q: &[F128], dims: usize, c: usize, trit_mapping: 
     // Slice management seems to have some small overhead at this scale, possibly replace with
     // raw pointer accesses? *Insert look what they have to do to mimic the fraction of our power meme*
     unsafe{
-        (p.par_chunks(1 << (c + 1)).zip(q.par_chunks(1 << (c + 1)))).zip(
-        p_ext.par_chunks_mut(pow3_adj).zip(q_ext.par_chunks_mut(pow3_adj))
+        #[cfg(not(feature = "parallel"))]
+        let pchunks = p.chunks(1 << (c + 1));
+        #[cfg(not(feature = "parallel"))]
+        let qchunks = q.chunks(1 << (c + 1));
+        #[cfg(not(feature = "parallel"))]
+        let p_ext_chunks = p_ext.chunks_mut(pow3_adj);
+        #[cfg(not(feature = "parallel"))]
+        let q_ext_chunks = q_ext.chunks_mut(pow3_adj);
+        #[cfg(not(feature = "parallel"))]
+        let ret_chunks = ret.chunks_mut(pow3);
+
+        #[cfg(feature = "parallel")]
+        let pchunks = p.par_chunks(1 << (c + 1));
+        #[cfg(feature = "parallel")]
+        let qchunks = q.par_chunks(1 << (c + 1));
+        #[cfg(feature = "parallel")]
+        let p_ext_chunks = p_ext.par_chunks_mut(pow3_adj);
+        #[cfg(feature = "parallel")]
+        let q_ext_chunks = q_ext.par_chunks_mut(pow3_adj);
+        #[cfg(feature = "parallel")]
+        let ret_chunks = ret.par_chunks_mut(pow3);
+
+
+
+        pchunks.zip(qchunks).zip(
+        p_ext_chunks.zip(q_ext_chunks)
         ).zip(
-        ret.par_chunks_mut(pow3)).map(|(((p, q), (p_ext, q_ext)), ret)| {
+        ret_chunks).map(|(((p, q), (p_ext, q_ext)), ret)| {
             for j in 0..pow3_adj {
                 let offset = trit_mapping[j] as usize;
                 if offset % 2 == 0 {
@@ -212,8 +254,8 @@ fn extend_2_tables(p: &[F128], q: &[F128], dims: usize, c: usize, trit_mapping: 
     unsafe{transmute::<Vec<MaybeUninit<F128>>, Vec<F128>>(ret)}
 }
 
-#[unroll::unroll_for_loops]
-const fn drop_top_bit(x: usize) -> (usize, usize) {
+//#[unroll::unroll_for_loops]
+fn drop_top_bit(x: usize) -> (usize, usize) {
     let mut s = 0;
     for i in 0..8 {
         let bit = (x >> i) % 2;
@@ -222,7 +264,7 @@ const fn drop_top_bit(x: usize) -> (usize, usize) {
     (x - (1 << s), s)
 }
 
-#[unroll::unroll_for_loops]
+//#[unroll::unroll_for_loops]
 pub fn restrict(poly: &[F128], coords: &[F128], dims: usize) -> Vec<Vec<F128>> {
     assert!(poly.len() == 1 << dims);
     assert!(coords.len() <= dims);
@@ -250,7 +292,13 @@ pub fn restrict(poly: &[F128], coords: &[F128], dims: usize) -> Vec<Vec<F128>> {
         transmute::<*mut F128, usize>((*v).as_mut_ptr()) // This is extremely ugly.  
     }).collect_vec().try_into().unwrap();
 
-    (0..num_chunks).into_par_iter().map(move |i| {
+    #[cfg(feature = "parallel")]
+    let iter = (0..num_chunks).into_par_iter();
+
+    #[cfg(not(feature = "parallel"))]
+    let iter = (0..num_chunks).into_iter();
+
+    iter.map(move |i| {
         for j in 0 .. eq.len() / 16 { // Step by 16 
             let v0 = &eq_sums[j * 512 .. j * 512 + 256];
             let v1 = &eq_sums[j * 512 + 256 .. j * 512 + 512];
@@ -297,8 +345,8 @@ pub struct AndcheckProver {
     q_coords: Option<Vec<Vec<F128>>>,
 
     c: usize, // PHASE SWITCH, round < c => PHASE 1.
-    evaluation_claim: F128,
-    challenges: Vec<F128>,
+    pub evaluation_claim: F128,
+    pub challenges: Vec<F128>,
 
     bits_to_trits_map: Vec<u16>,
 
@@ -331,7 +379,7 @@ impl FinalClaim {
 
 
 impl AndcheckProver {
-    pub fn new(pt: Vec<F128>, p: Vec<F128>, q: Vec<F128>, evaluation_claim: F128, phase_switch: usize, check_correct: bool) -> Self {
+    pub fn new(pt: Vec<F128>, p: Vec<F128>, q: Vec<F128>, evaluation_claim: F128, phase_switch: usize, check_correct: bool) -> Self {        
         assert!(1 << pt.len() == p.len());
         assert!(1 << pt.len() == q.len());
         assert!(phase_switch < pt.len());
@@ -342,6 +390,10 @@ impl AndcheckProver {
                 evaluation_claim
             )
         }
+        #[cfg(not(feature = "parallel"))]
+        println!("I'm single-threaded.");
+        #[cfg(feature = "parallel")]
+        println!("I'm multi-threaded.");
 
         // Represent values in (0, 1, \infty)^{c+1} (0, 1)^{n-c-1}
         
@@ -361,9 +413,9 @@ impl AndcheckProver {
 
         let end = Instant::now();
 
-        println!("AndcheckProver::new time {} ms",
-            (end-start).as_millis(),
-        );
+        // println!("AndcheckProver::new time {} ms",
+        //     (end-start).as_millis(),
+        // );
 
         Self{
             pt,
@@ -411,6 +463,24 @@ impl AndcheckProver {
             let phase1_dims = c - round;
             let pow3 = 3usize.pow(phase1_dims as u32);
 
+            #[cfg(not(feature = "parallel"))]
+            let mut poly_deg_2 =
+            (0 .. (1 << num_vars - c - 1)).into_iter().map(|i| {
+                let mut pd2_part = [F128::zero(), F128::zero(), F128::zero()];
+                for j in 0..(1 << phase1_dims) {
+                    let index = (i << phase1_dims) + j;
+                    let offset = 3 * (i * pow3 + self.bits_to_trits_map[j] as usize);
+                    let multiplier = eq_evs[index];
+                    pd2_part[0] += p_q_ext[offset] * multiplier;
+                    pd2_part[1] += p_q_ext[offset + 1] * multiplier;
+                    pd2_part[2] += p_q_ext[offset + 2] * multiplier;
+                }
+                pd2_part
+            }).fold([F128::zero(), F128::zero(), F128::zero()], |a, b|{
+                [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
+            });
+   
+            #[cfg(feature = "parallel")]
             let mut poly_deg_2 =
             (0 .. (1 << num_vars - c - 1)).into_par_iter().map(|i| {
                 let mut pd2_part = [F128::zero(), F128::zero(), F128::zero()];
@@ -462,8 +532,14 @@ impl AndcheckProver {
             self.evaluation_claim = poly_final[0] + poly_final[1] * round_challenge + poly_final[2] * r2 + poly_final[3] * r3;
             self.challenges.push(round_challenge);
 
+            #[cfg(feature = "parallel")]
+            let p_q_ext_chunks = p_q_ext.par_chunks(3);
+
+            #[cfg(not(feature = "parallel"))]
+            let p_q_ext_chunks = p_q_ext.chunks(3);
+
             self.p_q_ext = Some(
-                p_q_ext.par_chunks(3).map(|chunk| {
+                p_q_ext_chunks.map(|chunk| {
                     chunk[0] + (chunk[0] + chunk[1] + chunk[2]) * round_challenge + chunk[2] * r2
                 }).collect()
             );
@@ -507,7 +583,13 @@ impl AndcheckProver {
             // });
 
             unsafe{
-                (0..half).into_par_iter().map(|i| {
+                #[cfg(not(feature = "parallel"))]
+                let iter = (0..half).into_iter();
+
+                #[cfg(feature = "parallel")]
+                let iter = (0..half).into_par_iter();
+
+                iter.map(|i| {
                     let a = transmute::<F128, [u64; 2]>(eq_evs[i] * ((0..128).map(|j| {
                         F128::basis(j) * p_coords[j][2 * i] * q_coords[j][2 * i]
                     }).fold(F128::zero(), |a, b| a + b)));
@@ -566,16 +648,24 @@ impl AndcheckProver {
             self.evaluation_claim = poly_final[0] + poly_final[1] * round_challenge + poly_final[2] * r2 + poly_final[3] * r3;
             self.challenges.push(round_challenge);
 
-            // External iteration can be parallelized for early-ish rounds.
-            p_coords.par_iter_mut().map(|arr| {
+            #[cfg(not(feature = "parallel"))]
+            let iter = p_coords.iter_mut();
+            #[cfg(feature = "parallel")]
+            let iter = p_coords.par_iter_mut();
+
+            iter.map(|arr| {
                 for j in 0..half {
                     arr[j] = arr[2 * j] + (arr[2 * j + 1] + arr[2 * j]) * round_challenge
                 };
                 arr.truncate(half);
             }).count();
 
+            #[cfg(not(feature = "parallel"))]
+            let iter = q_coords.iter_mut();
+            #[cfg(feature = "parallel")]
+            let iter = q_coords.par_iter_mut();
 
-            q_coords.par_iter_mut().map(|arr| {
+            iter.map(|arr| {
                 for j in 0..half {
                     arr[j] = arr[2 * j] + (arr[2 * j + 1] + arr[2 * j]) * round_challenge
                 };
