@@ -1,4 +1,4 @@
-use std::{mem::transmute, arch::aarch64::{uint8x16_t, veorq_u8, vextq_u8, vmull_p64, vgetq_lane_u64, vreinterpretq_u64_u8, vreinterpretq_u8_p128, vld1q_s8, vandq_u8, vdupq_n_u8, vshlq_u8, vaddv_u8, vget_low_u8, vget_high_u8, vld1q_u8}, time::Instant};
+use std::{mem::transmute, arch::aarch64::{uint8x16_t, veorq_u8, vextq_u8, vmull_p64, vgetq_lane_u64, vreinterpretq_u64_u8, vreinterpretq_u8_p128, vld1q_s8, vandq_u8, vdupq_n_u8, vshlq_u8, vaddv_u8, vget_low_u8, vget_high_u8, vld1q_u8, vld1q_s64, vshlq_n_s64, int64x2_t}, time::Instant};
 
 use rand::{rngs::OsRng, RngCore};
 
@@ -204,7 +204,7 @@ fn test_for_mm_movemask_aarch64() {
     ];
     let input_vector = unsafe { vld1q_u8(bytes.as_ptr()) };
     let start = Instant::now();
-    let result = v_movemask_epi8(input_vector);
+    let result = v_movemask_epi8(unsafe{transmute::<uint8x16_t, [u8; 16]>(input_vector)});
     let end = Instant::now();
     println!("Olen2a {} nanos", (end - start).as_nanos());
 
@@ -219,6 +219,9 @@ fn test_for_mm_movemask_aarch64() {
     println!("Lev {} nanos", (end - start).as_nanos());
 
 }
+
 pub unsafe fn v_slli_epi64<const K: i32>(x: [u8; 16]) -> [u8; 16] {
-    todo!()
+    let data = vld1q_s64(x.as_ptr() as *const i64);
+    let result = vshlq_n_s64(data, K);
+    std::mem::transmute::<int64x2_t, [u8; 16]>(result)
 }
