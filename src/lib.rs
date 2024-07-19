@@ -3,4 +3,5 @@ pub mod andcheck;
 pub mod utils;
 pub mod precompute;
 pub mod backend;
-pub mod sumchecks;
+pub mod traits;
+pub mod lincheck;
