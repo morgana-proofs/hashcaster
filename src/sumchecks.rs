@@ -40,12 +40,12 @@ pub trait SumcheckObject {
 
 
 /// This describes a matrix from I arrays of size 2^logsize_in, to O arrays of size 2^logsize_outp 
-pub trait AdmissibleAffineMapping<const I: usize, const O: usize> {
+pub trait AdmissibleMatrix<const I: usize, const O: usize> {
     fn logsize_in(&self) -> usize;
     fn logsize_out(&self) -> usize;
     fn apply(&self, src: [&[F128]; I], dst: [&mut[MaybeUninit<F128>]; O]);
     /// Transposition of affine mapping (for example, v -> Mv + C) is separately
     /// w -> (M^t w, <C, w>)
     /// M^t w must be written into dst, and <C, w> returned from function.
-    fn apply_transposed(&self, src: [&[F128]; O], dst: [&mut[MaybeUninit<F128>]; I]) -> F128;
+    fn apply_transposed(&self, src: [&[F128]; O], dst: [&mut[MaybeUninit<F128>]; I]);
 }
