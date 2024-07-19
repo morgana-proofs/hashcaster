@@ -3,7 +3,7 @@ use std::{mem::{transmute, MaybeUninit}, sync::atomic::{AtomicU64, Ordering}, th
 use num_traits::{One, Pow, Zero};
 use rand::{rngs::OsRng, RngCore};
 use rayon::{iter::{IndexedParallelIterator, IntoParallelIterator, IntoParallelRefIterator, IntoParallelRefMutIterator, ParallelIterator}, slice::{ParallelSlice, ParallelSliceMut}};
-use crate::{backend::autodetect::{v_movemask_epi8, v_slli_epi64}, field::{pi, F128}, parallelize::parallelize, utils::u128_to_bits};
+use crate::{backend::autodetect::{v_movemask_epi8, v_slli_epi64}, field::{pi, F128}, utils::u128_to_bits};
 use itertools::Itertools;
 
 
@@ -358,12 +358,12 @@ pub struct RoundResponse {
 }
 
 /// This struct holds evaluations of p and q in inverse Frobenius orbit of a challenge point.
-pub struct FinalClaim {
+pub struct AndcheckFinalClaim {
     pub p_evs: Vec<F128>,
     pub q_evs: Vec<F128>,
 }
 
-impl FinalClaim {
+impl AndcheckFinalClaim {
     /// The function that computes evaluation of (P & Q) in a challenge point 
     /// through evaluations of P, Q in inverse Frobenius orbit.
     pub fn apply_algebraic_combinator(&self) -> F128 {
@@ -692,7 +692,7 @@ impl AndcheckProver {
     }
 
 
-    pub fn finish(&self) -> FinalClaim {
+    pub fn finish(&self) -> AndcheckFinalClaim {
         assert!(self.curr_round() == self.num_vars(), "Protocol is not finished.");
 
         let mut inverse_orbit = vec![];
@@ -741,7 +741,7 @@ impl AndcheckProver {
         p_evs.reverse();
         q_evs.reverse();
 
-        FinalClaim { p_evs, q_evs }
+        AndcheckFinalClaim { p_evs, q_evs }
     }
 }
 
