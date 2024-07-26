@@ -2,43 +2,33 @@ use std::{iter::once, mem::{transmute, MaybeUninit}};
 use num_traits::Zero;
 use rayon::iter::IntoParallelIterator;
 
-use crate::{andcheck::{eq_ev, eq_poly}, field::F128};
+use crate::{field::F128};
 
+#[derive(Clone, Debug)]
 pub struct CompressedPoly {
     pub compressed_coeffs: Vec<F128>,
 }
 
 impl CompressedPoly {
+    pub fn compress(poly: &[F128]) -> (Self, F128) {
+        let sum = poly.iter().skip(1).fold(F128::zero(), |a, b| a + b);
+        (
+            Self{compressed_coeffs: once(&poly[0]).chain(poly[2..].iter()).map(|x|*x).collect()},
+            sum
+        )
+    }
+    
     /// Recovers full polynomial from its compressed form and previous claim (which is P(0) + P(1)).
     pub fn coeffs(&self, sum: F128) -> Vec<F128> {
-        let ev_at_1 = self.compressed_coeffs.iter().fold(F128::zero(), |a, b| a + b);
-        let ev_at_0 = sum + ev_at_1;
-        once(ev_at_0).chain(self.compressed_coeffs.iter().map(|x|*x)).collect()
+        let coeff_0 = self.compressed_coeffs[0];
+        let ev_1 = coeff_0 + sum;
+        // evaluation in 1 is sum of all coefficients
+        // therefore to compute 1st coefficient, we need to add all others to eval at 1
+        let coeff_1 = self.compressed_coeffs.iter().fold(F128::zero(), |a, b| a + b) + ev_1;
+
+        once(coeff_0).chain(once(coeff_1)).chain(self.compressed_coeffs[1..].iter().map(|x|*x)).collect()
     }
 }
-
-pub trait TOpeningStatement {
-    /// Computes the expected claim from the opening statement.
-    fn apply_combinator(&self) -> F128;
-}
-
-pub trait SumcheckObject {
-    type OpeningStatement : TOpeningStatement;
-    type CachedData;
-
-    /// Returns false if the order is standard (from small-bit coordinates to large-bit), and true otherwise.
-    fn is_reverse_var_order(&self) -> bool;
-    /// Current claim. Expected to be equal to either combinator of the final claim, or msg(0)+msg(1) --
-    /// though because msg is compressed, it can actually be recovered using this claim.
-    fn current_claim(&self) -> F128;
-    /// Current univariate round polynomial. None means that the protocol has ended.
-    fn msg(&self) -> Option<CompressedPoly>;
-    /// Accept a new challenge. Will panic if the challenge is not expected.
-    fn challenge(&mut self, challenge: F128);
-    /// Finish the protocol. Returns an opening statement and arbitrary cached data (might be used by later protocols).
-    fn finish(self) -> (Self::OpeningStatement, Self::CachedData);
-}
-
 
 /// This describes a matrix from I arrays of size 2^logsize_in, to O arrays of size 2^logsize_outp 
 pub trait AdmissibleMatrix{
@@ -95,3 +85,71 @@ pub trait AdmissibleMatrix{
         unsafe{transmute::<Vec<Vec<MaybeUninit<F128>>>, Vec<Vec<F128>>>(ret)}
     }
 }
+
+pub trait SumcheckObject {
+    fn is_reverse_order(&self) -> bool;
+    /// Binds coordinates by the challenge.
+    fn bind(&mut self, challenge: F128);
+    /// Returns current round message.
+    /// Receiver is mutable to give it an opportunity to cache some data. This operation MUST be idempotent.
+    fn round_msg(&mut self) -> CompressedPoly;
+}
+
+
+// pub trait Protocol {
+//     type InitClaim;
+//     type RoundResponse;
+//     type FinalClaim;
+//     type Params;
+
+//     type Prover : ProtocolProver<
+//         InitClaim = Self::InitClaim,
+//         RoundResponse = Self::RoundResponse,
+//         FinalClaim = Self::FinalClaim,
+//         Params = Self::Params,
+//     >;
+    
+//     type Verifier : ProtocolVerifier<
+//         InitClaim = Self::InitClaim,
+//         RoundResponse = Self::RoundResponse,
+//         FinalClaim = Self::FinalClaim,
+//         Params = Self::Params,
+//     >;
+
+//     fn prover(
+//         claim: Self::InitClaim,
+//         params: Self::Params,
+//         init_data: <Self::Prover as ProtocolProver>::InitData
+//     ) -> Self::Prover;
+    
+//     fn verifier(
+//         claim: Self::InitClaim,
+//         params: Self::Params
+//     ) -> Self::Verifier;
+
+// }
+
+// pub trait ProtocolProver {
+//     type InitClaim;
+//     type RoundResponse;
+//     type FinalClaim;
+//     type Params;
+
+//     type InitData;
+//     type CachedData;
+
+//     fn challenge(&mut self, challenge: F128);
+//     fn msg(&self) -> Self::RoundResponse;
+//     fn finish(self) -> (Self::FinalClaim, Self::CachedData);
+// }
+
+// pub trait ProtocolVerifier {
+//     type InitClaim;
+//     type RoundResponse;
+//     type FinalClaim;
+//     type Params;
+
+//     fn round(&mut self, msg: Self::RoundResponse, challenge: F128);
+//     fn finish(self, final_claim: Self::FinalClaim);
+
+// }

@@ -3,6 +3,21 @@
 use std::mem::transmute;
 use rand::Rng;
 
+pub fn log2_exact(mut x: usize) -> usize {
+    let mut c = 0;
+    loop {
+        if x % 2 == 1 {
+            if x == 1 {
+                return c;
+            } else {
+                panic!("Not an exact power of 2.");
+            }
+        }
+        c += 1;
+        x >>= 1;
+    }
+}
+
 pub fn u128_to_bits(x: u128) -> Vec<bool> {
     let mut ret = Vec::with_capacity(128);
     let bytes = unsafe {transmute::<u128, [u8; 16]>(x)};
