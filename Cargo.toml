@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+bytemuck = {version = "1.16.1", features = ["extern_crate_alloc", "derive", "zeroable_maybe_uninit"]}
 cfg-if = "1.0.0"
 itertools = "0.13.0"
 num-traits = "0.2.19"

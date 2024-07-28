@@ -1,8 +1,14 @@
-use std::{mem::{transmute, MaybeUninit}, sync::atomic::{AtomicU64, Ordering}, thread::sleep, time::{Duration, Instant}};
+use std::{mem::{MaybeUninit}, sync::atomic::{AtomicU64, Ordering}, thread::sleep, time::{Duration, Instant}};
 
+use bytemuck::cast_slice;
 use num_traits::{One, Zero};
 use rayon::{iter::{IndexedParallelIterator, IntoParallelIterator, IntoParallelRefIterator, IntoParallelRefMutIterator, ParallelIterator}, slice::{ParallelSlice, ParallelSliceMut}};
-use crate::{backend::autodetect::{v_movemask_epi8, v_slli_epi64}, field::{pi, F128}};
+use crate::{
+    backend::autodetect::{v_movemask_epi8, v_slli_epi64},
+    field::{pi, F128},
+    ptr_utils::{AsSharedConstPtr, AsSharedMUConstPtr, AsSharedMUMutPtr, AsSharedMutPtr, UninitArr, UnsafeIndexMut, UnsafeIndexRaw, UnsafeIndexRawMut},
+    utils::log2_exact
+};
 use itertools::Itertools;
 
 pub enum RoundResponse {
@@ -42,9 +48,9 @@ pub fn eq_poly_sequence(pt: &[F128]) -> Vec<Vec<F128>> {
     for i in 1..(l+1) {
         let last = &ret[i-1];
         let multiplier = pt[l-i];
-        let mut incoming = vec![MaybeUninit::<F128>::uninit(); 1 << i];
+        let mut incoming = UninitArr::<F128>::new(1 << i);
         unsafe{
-        let ptr = transmute::<*mut MaybeUninit<F128>, usize>(incoming.as_mut_ptr());
+        let ptr = incoming.as_shared_mut_ptr();
 
             #[cfg(not(feature = "parallel"))]
             let iter = (0 .. (1 << (i-1))).into_iter();
@@ -53,13 +59,12 @@ pub fn eq_poly_sequence(pt: &[F128]) -> Vec<Vec<F128>> {
             let iter = (0 .. 1 << (i-1)).into_par_iter();
 
             iter.map(|j|{
-                let ptr = transmute::<usize, *mut MaybeUninit<F128>>(ptr);
                 let w = last[j];
                 let m = multiplier * w;
-                *ptr.offset(2*j as isize) = MaybeUninit::new(w + m);
-                *ptr.offset((2*j + 1) as isize) = MaybeUninit::new(m);
+                * ptr.get_mut(2*j) = w + m;
+                * ptr.get_mut(2*j + 1) = m;
             }).count();
-            ret.push(transmute::<Vec<MaybeUninit<F128>>, Vec<F128>>(incoming));
+            ret.push(incoming.assume_init());
         }
     }
 
@@ -152,7 +157,7 @@ pub fn extend_table(table: &[F128], dims: usize, c: usize, trits_mapping: &[u16]
     let pow3 = 3usize.pow((c + 1) as u32);
     assert!(pow3 < (1 << 15) as usize, "This is too large anyway ;)");
     let pow2 = 2usize.pow((dims - c - 1) as u32);
-    let mut ret = vec![MaybeUninit::uninit(); pow3 * pow2];
+    let mut ret = UninitArr::new(pow3 * pow2);
     unsafe{
 
         #[cfg(feature = "parallel")]
@@ -180,12 +185,12 @@ pub fn extend_table(table: &[F128], dims: usize, c: usize, trits_mapping: &[u16]
             }
         }).count();
     }
-    unsafe{transmute::<Vec<MaybeUninit<F128>>, Vec<F128>>(ret)}
+    unsafe {ret.assume_init()}
 }
 
 /// Extends two tables at the same time and ANDs them
 /// Gives some advantage because we skip 1/3 of writes into p_ext and q_ext.
-pub fn extend_2_tables(p: &[F128], q: &[F128], dims: usize, c: usize, trit_mapping: &[u16]) -> Vec<F128> {
+pub fn extend_2_tables_legacy(p: &[F128], q: &[F128], dims: usize, c: usize, trit_mapping: &[u16]) -> Vec<F128> {
     assert!(p.len() == 1 << dims);
     assert!(q.len() == 1 << dims);
     assert!(c < dims);
@@ -195,7 +200,7 @@ pub fn extend_2_tables(p: &[F128], q: &[F128], dims: usize, c: usize, trit_mappi
     let pow2 = 2usize.pow((dims - c - 1) as u32);
     let mut p_ext = vec![MaybeUninit::uninit(); (pow3 * 2) / 3  * pow2];
     let mut q_ext = vec![MaybeUninit::uninit(); (pow3 * 2) / 3 * pow2];
-    let mut ret = vec![MaybeUninit::uninit(); pow3 * pow2];
+    let mut ret = UninitArr::new(pow3 * pow2);
 
     // Slice management seems to have some small overhead at this scale, possibly replace with
     // raw pointer accesses? *Insert look what they have to do to mimic the fraction of our power meme*
@@ -221,8 +226,6 @@ pub fn extend_2_tables(p: &[F128], q: &[F128], dims: usize, c: usize, trit_mappi
         let q_ext_chunks = q_ext.par_chunks_mut(pow3_adj);
         #[cfg(feature = "parallel")]
         let ret_chunks = ret.par_chunks_mut(pow3);
-
-
 
         pchunks.zip(qchunks).zip(
         p_ext_chunks.zip(q_ext_chunks)
@@ -259,8 +262,103 @@ pub fn extend_2_tables(p: &[F128], q: &[F128], dims: usize, c: usize, trit_mappi
             }
         }).count();
     }
-    unsafe{transmute::<Vec<MaybeUninit<F128>>, Vec<F128>>(ret)}
+    unsafe{ret.assume_init()}
 }
+
+/// Extends n tables and applies a formula F to them.
+/// Warning: n must be low enough, or you will get a lot of cache misses (each table_ext consumes ~ 3^c * 32 bytes of cache).
+/// For standard value of c, it gives 8Kb.
+/// Depending on cache size, one should switch to separate extension if amount of tables is too large, for 128kb cache
+/// I recommend doing it for > ~10, to be on a safe side.
+pub fn extend_n_tables<const N: usize, F: Fn([F128; N]) -> F128 + Send + Sync>(
+    tables: &[&[F128]],
+    c: usize,
+    trit_mapping: &[u16],
+    f: F
+) -> Vec<F128> {
+    assert!(tables.len() == N);
+    let dims = log2_exact(tables[0].len());
+    for table in tables {
+        assert!(table.len() == 1 << dims);
+    }
+    assert!(c < dims);
+    let pow3 = 3usize.pow((c + 1) as u32);
+    let pow3_adj = pow3 / 3 * 2;
+    assert!(pow3 < (1 << 15) as usize, "This is too large anyway ;)");
+    let pow2 = 2usize.pow((dims - c - 1) as u32);
+
+    let mut tables_ext = vec![];
+    for _ in 0..N {
+        tables_ext.push(UninitArr::new((pow3 * 2) / 3  * pow2))
+    }
+
+    let mut ret = UninitArr::new(pow3 * pow2);
+
+    // And we don't have multizip, so I guess I'm gonna write it with raw accesses once again. shrug
+
+    unsafe{
+        let table_ptrs_ : Vec<_> = tables.iter().map(|&table| table.as_shared_ptr()).collect();
+        let table_ptrs = table_ptrs_.as_shared_ptr();
+        let mut table_ext_ptrs_ : Vec<_> = tables_ext.iter_mut().map(|table| table.as_shared_mut_ptr()).collect();
+        let table_ext_ptrs = table_ext_ptrs_.as_shared_mut_ptr();
+    
+        let ret_ptr = ret.as_shared_mut_ptr();
+
+        // We have pow2 chunks in total - in tables, they are of size (1 << (c + 1)), in ret they are of size pow3
+        // and in extended tables they are of size (2/3) * pow3, which is pow3_adj.
+
+        #[cfg(not(feature = "parallel"))]
+        let chunk_id_iter = (0..pow2);
+        #[cfg(feature = "parallel")]
+        let chunk_id_iter = (0..pow2).into_par_iter();
+
+        chunk_id_iter.map(|chunk_id| {
+            let mut args = [F128::zero(); N]; 
+
+            let global_tab_offset = chunk_id * (1 << (c+1));
+            let global_ext_offset = chunk_id * pow3_adj;
+            let global_ret_offset = chunk_id * pow3;
+
+            for j in 0..pow3_adj {
+//                println!("entry, j = {}", j);
+                let offset = trit_mapping[j] as usize;
+                if offset % 2 == 0 {
+                    for z in 0..N {
+                        let table_z = *table_ptrs.get(z);
+                        let table_ext_z = *table_ext_ptrs.get_mut(z); 
+                         *table_ext_z.get_mut(global_ext_offset + j) =
+                             *table_z.get(global_tab_offset + (offset >> 1));
+                         args[z] = (*table_ext_z.get(global_ext_offset + j));
+                    }
+                } else {
+                    for z in 0..N {
+                        let table_ext_z = *(table_ext_ptrs.get(z));
+                         *table_ext_z.get_mut(global_ext_offset + j) =
+                             (*table_ext_z.get(global_ext_offset + j - offset)) +
+                             (*table_ext_z.get(global_ext_offset + j - 2 * offset));
+                        args[z] = (*table_ext_z.get(global_ext_offset + j));
+                    }
+                }
+                *ret_ptr.get_mut(global_ret_offset + j) = f(args);
+            }
+
+            for j in pow3_adj..pow3 {
+                let offset = trit_mapping[j] as usize;
+                for z in 0..N {
+                    let table_ext_z = *(table_ext_ptrs.get_mut(z));
+                    args[z] =
+                        (*table_ext_z.get(global_ext_offset + j - offset)) +
+                        (*table_ext_z.get(global_ext_offset + j - 2 * offset))
+                    ;
+                }
+                *ret_ptr.get_mut(global_ret_offset + j) = f(args);
+            }
+        }).count();
+        
+    }
+    unsafe{ret.assume_init()}
+}
+
 
 //#[unroll::unroll_for_loops]
 pub fn drop_top_bit(x: usize) -> (usize, usize) {
@@ -296,9 +394,9 @@ pub fn restrict(poly: &[F128], coords: &[F128], dims: usize) -> Vec<Vec<F128>> {
     }
 
     let mut ret = vec![vec![F128::zero(); num_chunks]; 128];
-    let ret_ptrs : [usize; 128] = ret.iter_mut().map(|v| unsafe{
-        transmute::<*mut F128, usize>((*v).as_mut_ptr()) // This is extremely ugly.  
-    }).collect_vec().try_into().unwrap();
+    let ret_ptrs : [_; 128] = ret.iter_mut().map(|v| unsafe{
+        v.as_shared_mut_ptr()
+    }).collect_vec().try_into().unwrap_or_else(|_|panic!());
 
     #[cfg(feature = "parallel")]
     let iter = (0..num_chunks).into_par_iter();
@@ -310,7 +408,7 @@ pub fn restrict(poly: &[F128], coords: &[F128], dims: usize) -> Vec<Vec<F128>> {
         for j in 0 .. eq.len() / 16 { // Step by 16 
             let v0 = &eq_sums[j * 512 .. j * 512 + 256];
             let v1 = &eq_sums[j * 512 + 256 .. j * 512 + 512];
-            let bytearr = unsafe{ transmute::<&[F128], &[[u8; 16]]>(
+            let bytearr = unsafe{ cast_slice::<F128, [u8; 16]>(
                 &poly[i * chunk_size + j * 16 .. i * chunk_size + (j + 1) * 16]
             ) };
 
@@ -327,9 +425,8 @@ pub fn restrict(poly: &[F128], coords: &[F128], dims: usize) -> Vec<Vec<F128>> {
                     let bits = v_movemask_epi8(t) as u16;
 
                     unsafe{
-                        let ret_ptrs = transmute::<[usize; 128], [*mut F128; 128]>(ret_ptrs);
-                        * ret_ptrs[s*8 + 7 - u].offset(i as isize) += v0[(bits & 255) as usize];
-                        * ret_ptrs[s*8 + 7 - u].offset(i as isize) += v1[((bits >> 8) & 255) as usize];
+                        * ret_ptrs[s*8 + 7 - u].get_mut(i) += v0[(bits & 255) as usize];
+                        * ret_ptrs[s*8 + 7 - u].get_mut(i) += v1[((bits >> 8) & 255) as usize];
                     }
                     t = v_slli_epi64::<1>(t);
                 }

@@ -1,8 +1,9 @@
-use std::{iter::once, mem::{transmute, MaybeUninit}};
+use std::{iter::once, mem::{MaybeUninit}};
 use num_traits::Zero;
+use bytemuck;
 use rayon::iter::IntoParallelIterator;
 
-use crate::{field::F128};
+use crate::{field::F128, ptr_utils::UninitArr};
 
 #[derive(Clone, Debug)]
 pub struct CompressedPoly {
@@ -59,7 +60,7 @@ pub trait AdmissibleMatrix{
         let mut ret = vec![];
 
         for _ in 0..num_output_polys {
-            ret.push(vec![MaybeUninit::<F128>::uninit(); nchunks * chunk_len_o]);
+            ret.push(UninitArr::<F128>::new(nchunks * chunk_len_o));
         }
 
         let mut input_slices : Vec<_> = input.iter().map(|x| x.chunks(chunk_len_i)).collect();
@@ -81,8 +82,8 @@ pub trait AdmissibleMatrix{
             }
             unsafe{ self.apply(&in_slices, &mut out_slices) };
         }
-        
-        unsafe{transmute::<Vec<Vec<MaybeUninit<F128>>>, Vec<Vec<F128>>>(ret)}
+
+        ret.into_iter().map(|arr| unsafe{arr.assume_init()}).collect()
     }
 }
 

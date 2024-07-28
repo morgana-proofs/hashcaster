@@ -30,7 +30,7 @@ pub fn u128_to_bits(x: u128) -> Vec<bool> {
 }
 
 pub fn u128_idx(x: &u128, i: usize) -> bool {
-    let bytes = unsafe{transmute::<&u128, &[u8; 16]>(x)};
+    let bytes = unsafe{transmute::<u128, [u8; 16]>(*x)};
     let byte_idx = i >> 3;
     let bit_idx = i ^ (byte_idx << 3);
     bytes[byte_idx] & (1 << bit_idx) != 0

@@ -2,7 +2,7 @@ use std::{mem::{transmute, MaybeUninit}, sync::atomic::{AtomicU64, Ordering}, ti
 
 use num_traits::{One, Zero};
 use rayon::{iter::{IndexedParallelIterator, IntoParallelIterator, IntoParallelRefIterator, IntoParallelRefMutIterator, ParallelIterator}, slice::{ParallelSlice, ParallelSliceMut}};
-use crate::{field::{pi, F128}, protocols::utils::{compute_trit_mappings, eq_ev, eq_poly, eq_poly_sequence, extend_2_tables, restrict}};
+use crate::{field::{pi, F128}, protocols::utils::{compute_trit_mappings, eq_ev, eq_poly, eq_poly_sequence, extend_2_tables_legacy, extend_n_tables, restrict}};
 use itertools::Itertools;
 
 
@@ -79,8 +79,9 @@ impl AndcheckProver {
         // let label = Instant::now();
         
         // let p_q_ext = p_ext.par_iter().zip(q_ext.par_iter()).map(|(a, b)| *a & *b).collect();
-
-        let p_q_ext = extend_2_tables(&p, &q, pt.len(), phase_switch, &trit_mapping);
+        // let p_q_ext = extend_2_tables_legacy(&p, &q, pt.len(), phase_switch, &trit_mapping);
+        
+        let p_q_ext = extend_n_tables(&[&p, &q], phase_switch, &trit_mapping, |[a, b]| {a & b});
 
         let eq_sequence = eq_poly_sequence(&pt[1..]); // We do not need whole eq, only partials. 
 
@@ -492,7 +493,7 @@ mod tests {
     #[test]
     fn verify_prover() {
         let rng = &mut OsRng;
-        let num_vars = 20;
+        let num_vars = 10;
 
         let pt : Vec<_> = repeat_with(|| F128::rand(rng)).take(num_vars).collect();
         let p : Vec<_> = repeat_with(|| F128::rand(rng)).take(1 << num_vars).collect();

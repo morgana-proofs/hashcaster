@@ -1,9 +1,11 @@
-use std::{mem::transmute, ops::{Add, AddAssign, BitAnd, BitAndAssign, Mul, MulAssign}};
+use std::{ops::{Add, AddAssign, BitAnd, BitAndAssign, Mul, MulAssign}};
 use crate::{backend::autodetect::mul_128, precompute::{cobasis_frobenius_table::COBASIS_FROBENIUS, cobasis_table::COBASIS, frobenius_table::FROBENIUS}, utils::{u128_rand, u128_to_bits}};
+use bytemuck::{AnyBitPattern, NoUninit};
 use num_traits::{One, Zero};
 use rand::Rng;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, AnyBitPattern, NoUninit)]
 pub struct F128 {
     pub(crate) raw: u128,
 }
