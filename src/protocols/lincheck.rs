@@ -2,15 +2,15 @@ use std::marker::PhantomData;
 
 use rayon::iter::IntoParallelIterator;
 
-use crate::{field::F128, traits::{AdmissibleMatrix}};
-use super::{prodcheck::Prodcheck, utils::{EvaluationClaim, RoundResponse}};
+use crate::{field::F128, traits::AdmissibleMatrix};
+use super::prodcheck::Prodcheck;
 
-pub struct Lincheck<M : AdmissibleMatrix> {
-    _marker: PhantomData<M>,
+pub struct Lincheck<const N: usize, const M: usize, Mat: AdmissibleMatrix<N, M>> {
+    _marker: PhantomData<Mat>,
     prodcheck_object: Prodcheck,
 }
 
-impl<M: AdmissibleMatrix> Lincheck<M> {
+impl<const N: usize, const M: usize, Mat: AdmissibleMatrix<N, M>> Lincheck<N, M, Mat> {
     pub fn new(polys: Vec<Vec<F128>>, point: &[F128], folding_challenge: F128) -> Self {
         let num_vars = point.len();
         

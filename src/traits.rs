@@ -11,6 +11,7 @@ pub struct CompressedPoly {
 }
 
 impl CompressedPoly {
+    /// Skips 1st coefficient.
     pub fn compress(poly: &[F128]) -> (Self, F128) {
         let sum = poly.iter().skip(1).fold(F128::zero(), |a, b| a + b);
         (
@@ -32,23 +33,18 @@ impl CompressedPoly {
 }
 
 /// This describes a matrix from I arrays of size 2^logsize_in, to O arrays of size 2^logsize_outp 
-pub trait AdmissibleMatrix{
-    fn num_input_polys(&self) -> usize;
-    fn num_output_polys(&self) -> usize;
+pub trait AdmissibleMatrix<const N: usize, const M: usize>{
     fn logsize_in(&self) -> usize;
     fn logsize_out(&self) -> usize;
     /// Unsafe contract: assumes that src.len() == num_input_polys, dst.len() == num_output_polys
     /// src[0].len() == logsize_in, dst[0].len() == logsize_out
     /// MUST initialize dst fully
-    unsafe fn apply(&self, src: &[&[F128]], dst: &[&mut[MaybeUninit<F128>]]);
+    unsafe fn apply(&self, src: &[&[F128]; N], dst: &[&mut[MaybeUninit<F128>]; M]);
     /// Same as apply, with src and dst switched.
     unsafe fn apply_transposed(&self, src: &[&[F128]], dst: &[&mut[MaybeUninit<F128>]]);
 
-    fn apply_full(&self, input: &[&[F128]]) -> Vec<Vec<F128>> {
-        let num_input_polys = self.num_input_polys();
-        let num_output_polys = self.num_output_polys();
-        
-        assert!(input.len() == num_input_polys);
+    fn apply_full(&self, input: &[&[F128]]) -> Vec<Vec<F128>> {        
+        assert!(input.len() == N);
         assert!(input.len() > 0, "Trivial case with 0 input unsupported because lazy.");
         
         let chunk_len_i = 1 << self.logsize_in();
@@ -59,25 +55,27 @@ pub trait AdmissibleMatrix{
 
         let mut ret = vec![];
 
-        for _ in 0..num_output_polys {
+        for _ in 0..M {
             ret.push(UninitArr::<F128>::new(nchunks * chunk_len_o));
         }
 
         let mut input_slices : Vec<_> = input.iter().map(|x| x.chunks(chunk_len_i)).collect();
         let mut output_slices : Vec<_> = ret.iter_mut().map(|x| x.chunks_mut(chunk_len_o)).collect();
 
-        let mut in_slices : Vec<&[F128]> = vec![&[]; num_input_polys];
+        let mut in_slices : [&[F128]; N] = [&[]; N];
         let mut out_slices : Vec<&mut[MaybeUninit<F128>]> = vec![];
-        for _ in 0..num_output_polys {
+        for _ in 0..M {
             out_slices.push(&mut[]);
         };
 
+        let mut out_slices : [&mut [MaybeUninit<F128>]; M] = out_slices.try_into().unwrap();
+
         // This can be parallelized if necessary, with high but acceptable amount of pain.
         for _ in 0..nchunks {
-            for i in 0..num_input_polys {
+            for i in 0..N {
                 in_slices[i] = input_slices[i].next().unwrap();
             }
-            for i in 0..num_output_polys {
+            for i in 0..M {
                 out_slices[i] = output_slices[i].next().unwrap();
             }
             unsafe{ self.apply(&in_slices, &mut out_slices) };
@@ -88,14 +86,15 @@ pub trait AdmissibleMatrix{
 }
 
 pub trait SumcheckObject {
+
     fn is_reverse_order(&self) -> bool;
     /// Binds coordinates by the challenge.
     fn bind(&mut self, challenge: F128);
     /// Returns current round message.
     /// Receiver is mutable to give it an opportunity to cache some data. This operation MUST be idempotent.
     fn round_msg(&mut self) -> CompressedPoly;
-}
 
+}
 
 // pub trait Protocol {
 //     type InitClaim;

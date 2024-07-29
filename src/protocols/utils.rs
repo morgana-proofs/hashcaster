@@ -11,16 +11,6 @@ use crate::{
 };
 use itertools::Itertools;
 
-pub enum RoundResponse {
-    AwaitsFoldingChallenge,
-    RoundPoly(Vec<F128>),
-}
-
-pub struct EvaluationClaim {
-    pub point: Vec<F128>,
-    pub eval: F128,
-}
-
 pub fn eq_poly(pt: &[F128]) -> Vec<F128> {
     let l = pt.len();
     let mut ret = Vec::with_capacity(1 << l);
@@ -394,9 +384,10 @@ pub fn restrict(poly: &[F128], coords: &[F128], dims: usize) -> Vec<Vec<F128>> {
     }
 
     let mut ret = vec![vec![F128::zero(); num_chunks]; 128];
-    let ret_ptrs : [_; 128] = ret.iter_mut().map(|v| unsafe{
-        v.as_shared_mut_ptr()
-    }).collect_vec().try_into().unwrap_or_else(|_|panic!());
+    let ret_ptrs : [_; 128] = ret.iter_mut().map(|v| v.as_shared_mut_ptr())
+        .collect_vec()
+        .try_into()
+        .unwrap_or_else(|_|panic!());
 
     #[cfg(feature = "parallel")]
     let iter = (0..num_chunks).into_par_iter();
@@ -408,9 +399,9 @@ pub fn restrict(poly: &[F128], coords: &[F128], dims: usize) -> Vec<Vec<F128>> {
         for j in 0 .. eq.len() / 16 { // Step by 16 
             let v0 = &eq_sums[j * 512 .. j * 512 + 256];
             let v1 = &eq_sums[j * 512 + 256 .. j * 512 + 512];
-            let bytearr = unsafe{ cast_slice::<F128, [u8; 16]>(
+            let bytearr = cast_slice::<F128, [u8; 16]>(
                 &poly[i * chunk_size + j * 16 .. i * chunk_size + (j + 1) * 16]
-            ) };
+            );
 
             // Iteration over bytes
             for s in 0..16 {

@@ -67,6 +67,7 @@ impl Prodcheck {
 }
 
 impl SumcheckObject for Prodcheck {
+
     fn is_reverse_order(&self) -> bool {
         self.rev_order
     }
