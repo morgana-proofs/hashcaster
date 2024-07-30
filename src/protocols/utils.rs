@@ -361,7 +361,80 @@ pub fn drop_top_bit(x: usize) -> (usize, usize) {
 }
 
 //#[unroll::unroll_for_loops]
-pub fn restrict(poly: &[F128], coords: &[F128], dims: usize) -> Vec<Vec<F128>> {
+/// A new version of restrict, to work with boolcheck's contigious array API
+/// It returns restrictions of all coordinates of all polynomials, and writes them in a single contigious array.
+pub fn restrict(polys: &[&[F128]], coords: &[F128], dims: usize) -> Vec<F128> {
+    let n = polys.len();
+    for poly in polys.iter() {
+        assert!(poly.len() == 1 << dims);
+    }
+    assert!(coords.len() <= dims);
+
+    let chunk_size = (1 << coords.len());
+    let num_chunks = 1 << (dims - coords.len());
+
+    let eq = eq_poly(coords);
+
+    assert!(eq.len() % 16 == 0, "Technical condition for now.");
+
+    let mut eq_sums = Vec::with_capacity(256 * eq.len() / 8);
+
+    for i in 0..eq.len()/8 {
+        eq_sums.push(F128::zero());
+        for j in 1..256 {
+            let (sum_idx, eq_idx) = drop_top_bit(j);
+            let tmp = eq[i * 8 + eq_idx] + eq_sums[i * 256 + sum_idx];
+            eq_sums.push(tmp);
+        }
+    }
+
+    let mut ret = vec![F128::zero(); num_chunks * 128 * n];
+    let ret_ptr = ret.as_shared_mut_ptr();
+
+    let n128 = n * 128;
+
+    for q in 0..n {
+        #[cfg(not(feature = "parallel"))]
+        let iter = (0..num_chunks).into_iter();   
+        #[cfg(feature = "parallel")]
+        let iter = (0..num_chunks).into_par_iter(); 
+        iter.map(|i| {
+            for j in 0 .. eq.len() / 16 { // Step by 16 
+                let v0 = &eq_sums[j * 512 .. j * 512 + 256];
+                let v1 = &eq_sums[j * 512 + 256 .. j * 512 + 512];
+                let bytearr = cast_slice::<F128, [u8; 16]>(
+                    &polys[q][i * chunk_size + j * 16 .. i * chunk_size + (j + 1) * 16]
+                );
+
+                // Iteration over bytes
+                for s in 0..16 {
+                    let mut t = [
+                        bytearr[0][s], bytearr[1][s], bytearr[2][s], bytearr[3][s],
+                        bytearr[4][s], bytearr[5][s], bytearr[6][s], bytearr[7][s],
+                        bytearr[8][s], bytearr[9][s], bytearr[10][s], bytearr[11][s],
+                        bytearr[12][s], bytearr[13][s], bytearr[14][s], bytearr[15][s],
+                    ];
+    
+                    for u in 0..8 {
+                        let bits = v_movemask_epi8(t) as u16;
+
+                        unsafe{
+                            * ret_ptr.get_mut((s*8 + 7 - u + q * 128) * num_chunks + i) += v0[(bits & 255) as usize];
+                            * ret_ptr.get_mut((s*8 + 7 - u + q * 128) * num_chunks + i) += v1[((bits >> 8) & 255) as usize];
+                        }
+                        t = v_slli_epi64::<1>(t);
+                    }
+                }
+
+            }
+        }
+        ).count();
+    }
+    ret
+}
+
+//#[unroll::unroll_for_loops]
+pub fn restrict_legacy(poly: &[F128], coords: &[F128], dims: usize) -> Vec<Vec<F128>> {
     assert!(poly.len() == 1 << dims);
     assert!(coords.len() <= dims);
 
@@ -428,4 +501,37 @@ pub fn restrict(poly: &[F128], coords: &[F128], dims: usize) -> Vec<Vec<F128>> {
     ).count();
 
     ret
+}
+
+#[cfg(test)]
+mod tests {
+    use std::iter::repeat_with;
+
+    use rand::rngs::OsRng;
+
+    use super::*;
+
+    #[test]
+    fn restrict_vs_restrict_legacy() {
+        let rng = &mut OsRng;
+        let num_vars = 8;
+        let num_vars_to_restrict = 5;
+        let pt : Vec<_> = repeat_with(|| F128::rand(rng)).take(num_vars).collect();
+        let poly0 : Vec<_> = repeat_with(|| F128::rand(rng)).take(1 << num_vars).collect();
+        let poly1 : Vec<_> = repeat_with(|| F128::rand(rng)).take(1 << num_vars).collect();
+        let poly2 : Vec<_> = repeat_with(|| F128::rand(rng)).take(1 << num_vars).collect();
+
+        let polys = [poly0.as_slice(), poly1.as_slice(), poly2.as_slice()];
+
+        let new_answer = restrict(&polys, &pt[..num_vars_to_restrict], num_vars);
+
+        let mut old_answer = vec![];
+        for i in 0..3 {
+            old_answer.push(
+                restrict_legacy(polys[i], &pt[..num_vars_to_restrict], num_vars)
+            );
+        }
+
+        assert!(old_answer.into_iter().map(|x|x.into_iter().flatten()).flatten().collect::<Vec<_>>() == new_answer);
+    }
 }

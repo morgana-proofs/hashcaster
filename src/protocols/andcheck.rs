@@ -2,7 +2,7 @@ use std::{mem::{transmute, MaybeUninit}, sync::atomic::{AtomicU64, Ordering}, ti
 
 use num_traits::{One, Zero};
 use rayon::{iter::{IndexedParallelIterator, IntoParallelIterator, IntoParallelRefIterator, IntoParallelRefMutIterator, ParallelIterator}, slice::{ParallelSlice, ParallelSliceMut}};
-use crate::{field::{pi, F128}, protocols::utils::{compute_trit_mappings, eq_ev, eq_poly, eq_poly_sequence, extend_2_tables_legacy, extend_n_tables, restrict}};
+use crate::{field::{pi, F128}, protocols::utils::{compute_trit_mappings, eq_ev, eq_poly, eq_poly_sequence, extend_2_tables_legacy, extend_n_tables, restrict_legacy}};
 use itertools::Itertools;
 
 
@@ -357,8 +357,8 @@ impl AndcheckProver {
             let _ = self.p_q_ext.take(); // it is useless now
             let p = self.p.take().unwrap(); // and these now will turn into p_i-s and q_is
             let q = self.q.take().unwrap();
-            self.p_coords = Some(restrict(&p, &self.challenges, num_vars));
-            self.q_coords = Some(restrict(&q, &self.challenges, num_vars));
+            self.p_coords = Some(restrict_legacy(&p, &self.challenges, num_vars));
+            self.q_coords = Some(restrict_legacy(&q, &self.challenges, num_vars));
             // TODO: we can avoid recomputing eq-s throughout the protocol in multiple places, including restrict
         }
 
@@ -483,7 +483,7 @@ mod tests {
             )
         }
 
-        let answer = restrict(&poly, &pt[..num_vars_to_restrict], num_vars);
+        let answer = restrict_legacy(&poly, &pt[..num_vars_to_restrict], num_vars);
 
         for i in 0..128 {
             assert!(evaluate(&answer[i], &pt[num_vars_to_restrict..]) == evaluate(&poly_unzip[i], &pt));
