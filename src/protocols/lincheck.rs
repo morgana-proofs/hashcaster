@@ -12,30 +12,19 @@ pub trait LinOp {
     fn apply_transposed(&self, input: &[F128], output: &mut [F128]);
 }
 
-pub struct Composition <
-    A: LinOp,
-    B: LinOp
-> {
+pub struct Composition <A: LinOp, B: LinOp> {
     a: A,
     b: B,
 }
 
-impl<
-    A: LinOp,
-    B: LinOp
->
-Composition<A, B> {
+impl<A: LinOp, B: LinOp> Composition<A, B> {
     pub fn new(a: A, b: B) -> Self {
         assert!(b.n_out() == a.n_in());
         Self { a, b }
     }
 }
 
-impl<
-    A: LinOp,
-    B: LinOp
->
-LinOp for Composition<A, B> {
+impl<A: LinOp, B: LinOp> LinOp for Composition<A, B> {
         
     fn n_in(&self) -> usize {
         self.b.n_in()
