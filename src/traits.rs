@@ -33,7 +33,7 @@ impl CompressedPoly {
 }
 
 /// This describes a matrix from I arrays of size 2^logsize_in, to O arrays of size 2^logsize_outp 
-pub trait AdmissibleMatrix<const N: usize, const M: usize>{
+pub trait AdmissibleMatrixLegacy<const N: usize, const M: usize>{
     fn logsize_in(&self) -> usize;
     fn logsize_out(&self) -> usize;
     /// Unsafe contract: assumes that src.len() == num_input_polys, dst.len() == num_output_polys
