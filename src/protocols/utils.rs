@@ -1,32 +1,88 @@
 use std::{mem::{MaybeUninit}, sync::atomic::{AtomicU64, Ordering}, thread::sleep, time::{Duration, Instant}};
 
-use bytemuck::cast_slice;
+use bytemuck::{cast, cast_slice};
 use num_traits::{One, Zero};
 use rayon::{iter::{IndexedParallelIterator, IntoParallelIterator, IntoParallelRefIterator, IntoParallelRefMutIterator, ParallelIterator}, slice::{ParallelSlice, ParallelSliceMut}};
 use crate::{
-    backend::autodetect::{v_movemask_epi8, v_slli_epi64},
-    field::{pi, F128},
-    ptr_utils::{AsSharedConstPtr, AsSharedMUConstPtr, AsSharedMUMutPtr, AsSharedMutPtr, UninitArr, UnsafeIndexMut, UnsafeIndexRaw, UnsafeIndexRawMut},
-    utils::log2_exact
+    backend::autodetect::{v_movemask_epi8, v_slli_epi64}, field::{pi, F128}, precompute::frobenius_table::FROBENIUS, ptr_utils::{AsSharedConstPtr, AsSharedMUConstPtr, AsSharedMUMutPtr, AsSharedMutPtr, UninitArr, UnsafeIndexMut, UnsafeIndexRaw, UnsafeIndexRawMut}, utils::{log2_exact, u128_idx}
 };
 use itertools::Itertools;
 
-pub fn eq_poly(pt: &[F128]) -> Vec<F128> {
+pub fn inv_frob_orbit(r: &[F128]) -> Vec<Vec<F128>> {
+    let mut inverse_orbit = vec![];
+    let mut r = r.to_vec();
+    for _ in 0..128 {
+        r.iter_mut().map(|x| *x *= *x).count();
+        inverse_orbit.push(r.clone());
+    }
+    inverse_orbit.reverse();
+    inverse_orbit
+}
+
+/// Given evaluations of coordinate polynomials P_i (r), return evaluations of P in inverse Frobenius orbit of r.
+pub fn twist_evals(evals: &mut [F128]) {
+    let mut twisted_evals = vec![];
+    for _ in 0..128 {
+        evals.iter_mut().map(|x| *x *= *x).count();
+        twisted_evals.push(
+            (0..128).map(|i| {
+                F128::basis(i) * evals[i]
+            }).fold(F128::zero(), |a, b| a + b)
+        );
+    }
+    twisted_evals.reverse();
+    evals.clone_from_slice(&twisted_evals);
+}
+
+/// Given evaluations of a polynomial P in inverse Frobenius orbit r, compute evaluations of P_i in r.
+/// TODO: rewrite more efficiently, .frob(i) is not good at all. Though right now I don't care about
+/// verifier that much.
+pub fn untwist_evals(twisted_evals: &mut [F128]) {
+    for i in 0..128 {
+        twisted_evals[i] = twisted_evals[i].frob(i as i32);
+    }
+
+    let untwisted : Vec<_> = (0..128).map(|i| pi(i, &twisted_evals)).collect();
+    twisted_evals.copy_from_slice(&untwisted);
+}
+
+pub fn eq_poly_legacy(pt: &[F128]) -> Vec<F128> {
     let l = pt.len();
     let mut ret = Vec::with_capacity(1 << l);
     ret.push(F128::one());
     for i in 0..l {
-//        let pt_idx = l - i - 1;
         let half = 1 << i;
         for j in 0..half {
             ret.push(pt[i] * ret[j]);
-        }
-        for j in 0..half{
             let tmp = ret[half + j];
             ret[j] += tmp;
         }
+
     }
     ret
+}
+
+pub fn eq_poly(pt: &[F128]) -> Vec<F128> {
+    let l = pt.len();
+    let mut ret = UninitArr::new(1 << l);
+    let ptr = ret.as_shared_mut_ptr();
+    unsafe{
+        *ptr.get_mut(0) = F128::one();
+        for i in 0..l {
+
+            let half = 1 << i;
+            #[cfg(not(feature = "parallel"))]
+            let iter = (0 .. (1 << half)).into_iter();
+
+            #[cfg(feature = "parallel")]
+            let iter = (0 .. half).into_par_iter();
+            iter.map(|j| {
+                *ptr.get_mut(j + half) = pt[i] * *ptr.get(j);
+                *ptr.get_mut(j) += *ptr.get(j + half);
+            }).count();
+        }
+    ret.assume_init()
+    }
 }
 
 pub fn eq_poly_sequence(pt: &[F128]) -> Vec<Vec<F128>> {
@@ -68,7 +124,11 @@ pub fn eq_ev(x: &[F128], y: &[F128]) -> F128 {
 
 pub fn evaluate(poly: &[F128], pt: &[F128]) -> F128 {
     assert!(poly.len() == 1 << pt.len());
-    poly.iter().zip_eq(eq_poly(pt)).fold(F128::zero(), |acc, (x, y)| acc + *x * y)
+    #[cfg(not(feature = "parallel"))]
+    let ret = poly.iter().zip_eq(eq_poly(pt)).fold(F128::zero(), |acc, (x, y)| acc + *x * y);
+    #[cfg(feature = "parallel")]
+    let ret = poly.par_iter().zip(eq_poly(pt)).map(|(x, y)| *x * y).reduce(||F128::zero(), |a, b| a + b);
+    ret
 }
 
 pub fn bits_to_trits(mut x: usize) -> usize {
@@ -468,7 +528,7 @@ pub fn restrict_legacy(poly: &[F128], coords: &[F128], dims: usize) -> Vec<Vec<F
     #[cfg(not(feature = "parallel"))]
     let iter = (0..num_chunks).into_iter();
 
-    iter.map(move |i| {
+    iter.map(|i| {
         for j in 0 .. eq.len() / 16 { // Step by 16 
             let v0 = &eq_sums[j * 512 .. j * 512 + 256];
             let v1 = &eq_sums[j * 512 + 256 .. j * 512 + 512];
@@ -503,11 +563,124 @@ pub fn restrict_legacy(poly: &[F128], coords: &[F128], dims: usize) -> Vec<Vec<F
     ret
 }
 
+/// This implements efficient matrices using method of 4 Russians, 128x128.
+/// Technically we could implements 128 x N, and use in restrict, but I will avoid it for now. 
+#[derive(Clone, Debug)]
+pub struct EfficientMatrix {
+    precomp: Vec<F128>, // array of size 256 * 16, containing all results for each byte.
+}
+
+impl EfficientMatrix {
+    pub fn new_from_rows(rows: &[F128]) -> Self {
+        let mut cols = Vec::with_capacity(128 * 2);
+        for _ in 0..128*2 {
+            cols.push(AtomicU64::new(0));
+        }
+
+        assert!(rows.len() == 128);
+        let rows = cast_slice::<F128, [u8; 16]>(rows);
+
+        let iter = rows.par_chunks(16);
+
+        iter.enumerate().map(|(chunk_idx, chunk)|{
+            let idx_u64 = chunk_idx / 4;
+            let shift = 16 * (chunk_idx % 4);
+
+            let mut t;
+            for i in 0..16 {
+                t = 
+                    [
+                        chunk[0][i], chunk[1][i], chunk[2][i], chunk[3][i],
+                        chunk[4][i], chunk[5][i], chunk[6][i], chunk[7][i],
+                        chunk[8][i], chunk[9][i], chunk[10][i], chunk[11][i],
+                        chunk[12][i], chunk[13][i], chunk[14][i], chunk[15][i],
+                    ];
+                for j in 0..8 {
+                    let bits = (v_movemask_epi8(t) as u64) << shift;
+                    cols[2 * (8 * i + 7 - j) + idx_u64].fetch_xor(bits, Ordering::Relaxed);
+                    t = v_slli_epi64::<1>(t);
+                }
+            }
+        }).count();
+
+        let cols : Vec<u64> = cols.iter().map(|x| x.load(Ordering::Relaxed)).collect();
+
+        let cols = cast_slice::<u64, F128>(&cols);
+
+        Self::new_from_cols(cols)
+    }
+
+    pub fn new_from_cols(cols: &[F128]) -> Self {
+        assert!(cols.len() == 128);
+        let mut precomp = vec![F128::zero(); 256 * 16];
+
+        #[cfg(not(feature = "parallel"))]
+        let row_iter = cols.chunks(8);
+        let sums_iter = precomp.chunks_mut(256);
+
+        #[cfg(feature = "parallel")]
+        let row_iter = cols.par_chunks(8);
+        let sums_iter = precomp.par_chunks_mut(256);
+
+        row_iter.zip(sums_iter).map(|(cols, sums)| {
+            sums[0] = F128::zero();
+            for i in 1..256 {
+                let (sum_idx, row_idx) = drop_top_bit(i);
+                sums[i] = sums[sum_idx] + cols[row_idx];
+            }
+        }).count();
+
+        Self{precomp}
+    }
+
+    pub fn apply(&self, elt: F128) -> F128 {
+        let elt = cast::<F128, [u8; 16]>(elt);
+        let mut ret = self.precomp[elt[0] as usize];
+        for i in 1..16 {
+            ret += self.precomp[elt[i] as usize + 256 * i]
+        }
+        ret
+    }
+}
+
+
+/// Creates matrix sum_i gamma_i Fr^i 
+pub fn frobenius_lc(gammas: &[F128]) -> EfficientMatrix{
+    assert!(gammas.len() == 128);
+    
+    let mut ret = vec![F128::zero(); 128];
+
+    for i in 0..128 {
+        for j in 0..128 {
+            ret[j] += gammas[i] * F128::from_raw(FROBENIUS[i][j])
+        }
+    };
+
+    EfficientMatrix::new_from_cols(&ret)
+}
+
+pub fn frobenius_inv_lc(gammas: &[F128]) -> EfficientMatrix{
+    assert!(gammas.len() == 128);
+    
+    let mut ret = vec![F128::zero(); 128];
+
+    for i in 0..128 {
+        let minus_i = (128 - i) % 128;
+        for j in 0..128 {
+            ret[j] += gammas[i] * F128::from_raw(FROBENIUS[minus_i][j])
+        }
+    };
+
+    EfficientMatrix::new_from_cols(&ret)
+}
+
 #[cfg(test)]
 mod tests {
-    use std::iter::repeat_with;
+    use std::iter::{once, repeat_with};
 
     use rand::rngs::OsRng;
+
+    use crate::utils::Matrix;
 
     use super::*;
 
@@ -534,4 +707,120 @@ mod tests {
 
         assert!(old_answer.into_iter().map(|x|x.into_iter().flatten()).flatten().collect::<Vec<_>>() == new_answer);
     }
+
+    #[test]
+    fn twist_untwist() {
+        let rng = &mut OsRng;
+        let lhs : Vec<_> = repeat_with(|| F128::rand(rng)).take(128).collect();
+        let mut rhs = lhs.clone();
+
+        twist_evals(&mut rhs);
+        untwist_evals(&mut rhs);
+
+        assert!(lhs == rhs);
+
+        untwist_evals(&mut rhs);
+        twist_evals(&mut rhs);
+
+        assert!(lhs == rhs);
+    }
+
+    #[test]
+
+    fn twist_computes_expected_openings() {
+        let num_vars = 10;
+        let rng = &mut OsRng;
+        let pt : Vec<_> = repeat_with(|| F128::rand(rng)).take(num_vars).collect();
+        let poly : Vec<_> = repeat_with(|| F128::rand(rng)).take(1 << num_vars).collect();
+
+        let mut coord_evs = vec![];
+
+        for i in 0..128 {
+            let poly_i : Vec<_> = poly.iter().map(|x| F128::new(u128_idx(&x.raw, i))).collect();
+            coord_evs.push(evaluate(&poly_i, &pt));
+        }
+
+        let mut tmp = F128::zero();
+        for i in 0..128 {
+            tmp += coord_evs[i] * F128::basis(i);
+        }
+
+        assert!(tmp == evaluate(&poly, &pt));
+
+        let mut pt_inv_orbit = vec![];
+        for i in 0..128i32 {
+            pt_inv_orbit.push(
+                pt.iter().map(|x| x.frob(-i)).collect::<Vec<F128>>()
+            )
+        }
+
+        let twisted_evs : Vec<_> = (0..128).map(|i| evaluate(&poly, &pt_inv_orbit[i])).collect();
+
+        twist_evals(&mut coord_evs);
+        assert!(twisted_evs == coord_evs);
+
+    }
+
+    #[test]
+
+    fn matrices() {
+        let rng = &mut OsRng;
+        let cols : Vec<_> = repeat_with(|| F128::rand(rng)).take(128).collect();
+        let eff = EfficientMatrix::new_from_cols(&cols);
+        let naive = Matrix::new(cols.iter().map(|x| x.raw()).collect_vec());
+        let test_vec = F128::rand(rng);
+        assert!(naive.apply(test_vec.raw) == eff.apply(test_vec).raw);
+    }
+
+    #[test]
+
+    fn left_mult() {
+        let rng = &mut OsRng;
+        let x = F128::rand(rng);
+        let cols : Vec<_> = (0..128).map(|i| F128::basis(i)*x).collect();
+
+        let mult_by_x = EfficientMatrix::new_from_cols(&cols);
+
+        let mut lhs = F128::rand(rng);
+        let mut rhs = lhs;
+
+        let label0 = Instant::now();
+        for i in 0..1<<22 {
+            lhs = x * lhs
+        }
+        let label1 = Instant::now();
+        for i in 0..1<<22 {
+            rhs = mult_by_x.apply(rhs)
+        }
+        let label2 = Instant::now();
+
+        println!("Normal multiplication took {} ms", (label1 - label0).as_millis());
+        println!("Matrix multiplication took {} ms", (label2 - label1).as_millis());
+
+        assert!(lhs == rhs);
+    }
+
+    #[test]
+    fn frobenius_lc_as_expected() {
+        let rng = &mut OsRng;
+        let x = F128::rand(rng);
+        let gammas : Vec<_> = (0..128).map(|_|F128::rand(rng)).collect();
+
+        let mut lhs = F128::zero();
+        for i in 0..128 {
+            lhs += gammas[i] * x.frob(i as i32);
+        }
+        let m = frobenius_lc(&gammas);
+        let rhs = m.apply(x);
+        assert!(lhs == rhs);
+
+        let mut lhs = F128::zero();
+        for i in 0..128 {
+            lhs += gammas[i] * x.frob(- (i as i32));
+        }
+        let m = frobenius_inv_lc(&gammas);
+        let rhs = m.apply(x);
+        assert!(lhs == rhs);
+    }
+
 }

@@ -1,6 +1,6 @@
 // This mainly contains linear algebra code required to find necessary bases.
 
-use std::mem::transmute;
+use bytemuck::cast;
 use rand::Rng;
 
 pub fn log2_exact(mut x: usize) -> usize {
@@ -20,7 +20,7 @@ pub fn log2_exact(mut x: usize) -> usize {
 
 pub fn u128_to_bits(x: u128) -> Vec<bool> {
     let mut ret = Vec::with_capacity(128);
-    let bytes = unsafe {transmute::<u128, [u8; 16]>(x)};
+    let bytes = cast::<u128, [u8; 16]>(x);
     for i in 0..16 {
         for j in 0..8 {
             ret.push((bytes[i] & (1 << j)) != 0)
@@ -30,7 +30,7 @@ pub fn u128_to_bits(x: u128) -> Vec<bool> {
 }
 
 pub fn u128_idx(x: &u128, i: usize) -> bool {
-    let bytes = unsafe{transmute::<u128, [u8; 16]>(*x)};
+    let bytes = cast::<u128, [u8; 16]>(*x);
     let byte_idx = i >> 3;
     let bit_idx = i ^ (byte_idx << 3);
     bytes[byte_idx] & (1 << bit_idx) != 0
@@ -144,7 +144,7 @@ impl Matrix {
 pub fn u128_rand<RNG: Rng>(rng: &mut RNG) -> u128 {
     let a = rng.next_u64();
     let b = rng.next_u64();
-    unsafe{transmute::<(u64, u64), u128>((a, b))}
+    cast::<[u64; 2], u128>([a, b])
 }
 
 #[cfg(test)]

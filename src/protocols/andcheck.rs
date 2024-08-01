@@ -369,14 +369,6 @@ impl AndcheckProver {
     pub fn finish(&self) -> AndcheckFinalClaim {
         assert!(self.curr_round() == self.num_vars(), "Protocol is not finished.");
 
-        let mut inverse_orbit = vec![];
-        let mut pt = self.challenges.clone();
-        for _ in 0..128 {
-            pt.iter_mut().map(|x| *x *= *x).count();
-            inverse_orbit.push(pt.clone());
-        }
-        inverse_orbit.reverse();
-
         let mut p_i_evs = self.p_coords.as_ref().unwrap().iter().map(|a| {
             assert!(a.len() == 1);
             a[0]
@@ -493,7 +485,7 @@ mod tests {
     #[test]
     fn verify_prover() {
         let rng = &mut OsRng;
-        let num_vars = 10;
+        let num_vars = 20;
 
         let pt : Vec<_> = repeat_with(|| F128::rand(rng)).take(num_vars).collect();
         let p : Vec<_> = repeat_with(|| F128::rand(rng)).take(1 << num_vars).collect();

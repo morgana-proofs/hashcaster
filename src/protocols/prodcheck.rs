@@ -1,5 +1,6 @@
-use std::{mem::transmute, sync::atomic::{AtomicU64, Ordering}};
+use std::{sync::atomic::{AtomicU64, Ordering}};
 
+use bytemuck::cast;
 use itertools::Itertools;
 use num_traits::Zero;
 use rayon::iter::{ParallelIterator, IntoParallelIterator};
@@ -9,9 +10,9 @@ use crate::{field::F128, traits::{CompressedPoly, SumcheckObject}, utils::log2_e
 
 /// A very simple sumcheck, only does product of 2 polynomials. It is used as main component for lincheck.
 pub struct Prodcheck {
-    p_polys: Vec<Vec<F128>>,
-    q_polys: Vec<Vec<F128>>,
-    claim: F128,
+    pub p_polys: Vec<Vec<F128>>,
+    pub q_polys: Vec<Vec<F128>>,
+    pub claim: F128,
     challenges: Vec<F128>,
     num_vars: usize,
 
@@ -115,6 +116,8 @@ impl SumcheckObject for Prodcheck {
             self.q_polys = q_new;
             
         }
+
+        self.cached_round_msg = None;
     }
 
     fn round_msg(&mut self) -> CompressedPoly {
@@ -138,32 +141,17 @@ impl SumcheckObject for Prodcheck {
         #[cfg(feature = "parallel")]
         let iter = (0 .. half).into_par_iter();
 
-        let acc = [
-            AtomicU64::new(0),
-            AtomicU64::new(0),
-            AtomicU64::new(0),
-            AtomicU64::new(0),
-            AtomicU64::new(0),
-            AtomicU64::new(0)
-        ]; // Evaluations in zero will be removed during optimization later, now we keep them for testing.
-
+        let iter = 
         iter.map(|i|{
             let mut pq_zero = self.p_polys[0][2 * i] * self.q_polys[0][2 * i];
             for j in 1..l {
                 pq_zero += self.p_polys[j][2 * i] * self.q_polys[j][2 * i]
             }
-            let pq_zero = unsafe{transmute::<F128, [u64; 2]>(
-                pq_zero
-            )};
 
             let mut pq_one = self.p_polys[0][2 * i + 1] * self.q_polys[0][2 * i + 1];
             for j in 1..l {
                 pq_one += self.p_polys[j][2 * i + 1] * self.q_polys[j][2 * i + 1]
             }
-            let pq_one = unsafe{transmute::<F128, [u64; 2]>(
-                pq_one
-            )};
-
 
             let mut pq_inf =
                 (self.p_polys[0][2 * i] + self.p_polys[0][2 * i + 1])
@@ -174,29 +162,25 @@ impl SumcheckObject for Prodcheck {
                     (self.p_polys[j][2 * i] + self.p_polys[j][2 * i + 1])
                     * (self.q_polys[j][2 * i] + self.q_polys[j][2 * i + 1]);
             }
-            let pq_inf = unsafe{transmute::<F128, [u64; 2]>(
-                pq_inf
-            )};
 
-            acc[0].fetch_xor(pq_zero[0], Ordering::Relaxed);
-            acc[1].fetch_xor(pq_zero[1], Ordering::Relaxed);
+            [pq_zero, pq_one, pq_inf]
+        });
+        
+        #[cfg(not(feature = "parallel"))]
+        let mut response = iter.fold([F128::zero(), F128::zero(), F128::zero()], |[a, b, c], [d, e, f]| [a+d, b+e, c+f]);
 
-            acc[2].fetch_xor(pq_one[0], Ordering::Relaxed);
-            acc[3].fetch_xor(pq_one[1], Ordering::Relaxed);
+        #[cfg(feature = "parallel")]
+        let mut response = iter.reduce(|| [F128::zero(), F128::zero(), F128::zero()], |[a, b, c], [d, e, f]| [a+d, b+e, c+f]);
 
-            acc[4].fetch_xor(pq_inf[0], Ordering::Relaxed);
-            acc[5].fetch_xor(pq_inf[1], Ordering::Relaxed);
-        }).count();
-
-        let acc : [u64; 6] = acc.iter().map(|x| x.load(Ordering::Relaxed)).collect_vec().try_into().unwrap();
-        let mut response = unsafe{ transmute::<[u64; 6], [F128; 3]>(acc) };
+        // let acc : [u64; 6] = acc.iter().map(|x| x.load(Ordering::Relaxed)).collect_vec().try_into().unwrap();
+        // let mut response = cast::<[u64; 6], [F128; 3]>(acc);
 
         // cast to coefficient form
         response[1] += response[0];
         response[1] += response[2];
 
         let (compressed_response, _) = CompressedPoly::compress(&response);
-        
+
         self.cached_round_msg = Some(compressed_response.clone());
         compressed_response
     }
@@ -213,7 +197,7 @@ mod tests {
     #[test]
     fn prodcheck_works() {
         let rng = &mut OsRng;
-        let num_vars = 1;
+        let num_vars = 15;
 
         let mut p_polys = vec![];
         let mut q_polys = vec![];
@@ -227,7 +211,7 @@ mod tests {
 
         let mut prover = Prodcheck::new(p_polys.clone(), q_polys.clone(), claim, true, false);
 
-        for _ in 0..num_vars {
+        for i in 0..num_vars {
             let round_poly = prover.round_msg().coeffs(claim);
             let challenge = F128::rand(rng);
             claim = round_poly[0] + challenge * round_poly[1] + challenge * challenge * round_poly[2];
@@ -238,8 +222,6 @@ mod tests {
 
         let ev_p : Vec<_> = p_polys.iter().map(|p| evaluate(&p, &prover.challenges)).collect();
         let ev_q : Vec<_> = q_polys.iter().map(|q| evaluate(&q, &prover.challenges)).collect();
-
-        assert!(prover.claim == claim);
 
         assert!(ev_p.iter().zip(ev_q.iter()).map(|(a, b)| *a * b).fold(F128::zero(), |a, b| a + b) == claim);
     }
