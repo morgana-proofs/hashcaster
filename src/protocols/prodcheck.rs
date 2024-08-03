@@ -1,4 +1,4 @@
-use std::{sync::atomic::{AtomicU64, Ordering}};
+use std::{sync::atomic::{AtomicU64, Ordering}, time::Instant};
 
 use bytemuck::cast;
 use itertools::Itertools;
@@ -32,6 +32,8 @@ impl Prodcheck {
         in_reverse_order: bool,
     ) -> Self {
 
+        let start = Instant::now();
+
         let num_vars = log2_exact(p_polys[0].len());
         assert!(p_polys.len() == q_polys.len());
         for i in 0..p_polys.len() {
@@ -53,6 +55,10 @@ impl Prodcheck {
             assert!(initial_claim == expected_claim);
         }
 
+        let end = Instant::now();
+
+        println!("Prodcheck init took: {} ms", (end-start).as_millis());
+
         Self {
             p_polys,
             q_polys,
@@ -65,6 +71,17 @@ impl Prodcheck {
             rev_order: in_reverse_order,
         }
     }
+
+    pub fn finish(self) -> ProdcheckOutput {
+        let p_evs = self.p_polys.iter().map(|poly| {assert!(poly.len() == 1); poly[0]}).collect();
+        let q_evs = self.q_polys.iter().map(|poly| {assert!(poly.len() == 1); poly[0]}).collect();
+        ProdcheckOutput{p_evs, q_evs}
+    }
+}
+
+pub struct ProdcheckOutput {
+    pub p_evs: Vec<F128>,
+    pub q_evs: Vec<F128>
 }
 
 impl SumcheckObject for Prodcheck {

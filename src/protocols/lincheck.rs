@@ -1,8 +1,14 @@
+use std::time::Instant;
+
 use num_traits::{One, Zero};
+use rayon::iter::{IndexedParallelIterator, IntoParallelRefIterator, IntoParallelRefMutIterator, ParallelIterator};
+use rayon::slice::ParallelSlice;
 
-use crate::{field::F128, utils::log2_exact};
+use crate::protocols::utils::evaluate;
+use crate::traits::{CompressedPoly, SumcheckObject};
+use crate::{field::F128, protocols::utils::eq_poly,};
 
-use super::prodcheck::Prodcheck;
+use super::prodcheck::{Prodcheck, ProdcheckOutput};
 
 pub trait LinOp {
     fn n_in(&self) -> usize;
@@ -52,7 +58,7 @@ impl<A: LinOp, B: LinOp> LinOp for Composition<A, B> {
 
 
 /// Represents a linear sumcheck of the form
-/// M(pt_0, ... pt_{a-1}; x_0, ..., x_{a-1}) * P(x_0, ..., x_{a-1}, pt_a, ..., pt_{n-1}),
+/// M(pt_{n-a}, ... pt_{n-1}; x_{n-a}, ..., x_{n-1}) * P(pt_0, ..., pt_{n-a-1}, x_{n-a}, ..., x_{n-1}),
 /// where `a` is a number of "active" variables.
 /// It is very small, and the main computational work is computing the restriction
 /// P(x_0, ..., x_{a-1}, pt_a, ..., pt_{n-1}).
@@ -66,10 +72,11 @@ pub struct Lincheck<const N: usize, const M: usize, L: LinOp> {
     pt: Vec<F128>,
     num_vars: usize,
     num_active_vars: usize,
+    initial_claim: F128,
 }
 
 impl<const N: usize, const M: usize, L: LinOp> Lincheck<N, M, L> {
-    pub fn new(polys: [Vec<F128>; N], pt: Vec<F128>, matrix: L, num_active_vars: usize) -> Self {
+    pub fn new(polys: [Vec<F128>; N], pt: Vec<F128>, matrix: L, num_active_vars: usize, initial_claim: F128) -> Self {
         assert!(matrix.n_in() == N * (1 << num_active_vars));
         assert!(matrix.n_out() == M * (1 << num_active_vars));
         let num_vars = pt.len();
@@ -77,20 +84,265 @@ impl<const N: usize, const M: usize, L: LinOp> Lincheck<N, M, L> {
         for i in 0..N {
             assert!(polys[i].len() == 1 << num_vars);
         }
-        Self { matrix, polys, pt, num_vars, num_active_vars }
+        Self { matrix, polys, pt, num_vars, num_active_vars, initial_claim }
     } 
 
     pub fn folding_challenge(self, gamma: F128) -> PreparedLincheck {
+        let chunk_size = 1 << self.num_active_vars;
+        let pt_active = &self.pt[ .. self.num_active_vars];
+        let pt_dormant = &self.pt[self.num_active_vars .. ];
+        // Restrict.
+        
+        let label0 = Instant::now();
+
+        let eq_dormant = eq_poly(&pt_dormant);
+        let mut p_polys = vec![vec![F128::zero(); 1 << self.num_active_vars]; N];
+        
+
+        self.polys.into_iter().enumerate().map(|(i, poly)| {
+            let poly_chunks = poly.chunks(chunk_size);
+            poly_chunks.enumerate().map(|(j, chunk)| {
+                p_polys[i].iter_mut().zip(chunk.iter()).map(|(p, c)| *p += eq_dormant[j] * c).count();
+        }).count()}).count();
+
+        let label1 = Instant::now();
+
+        println!("Restrict took {} ms", (label1 - label0).as_millis());
+
         let mut gamma_pows = Vec::with_capacity(M);
         let mut tmp = F128::one();
         for _ in 0..M {
             gamma_pows.push(tmp);
             tmp *= gamma;
         }
-        let eq = eq_poly();
+        let eq = eq_poly(&pt_active);
+        let gamma_eqs: Vec<_> = gamma_pows.iter()
+            .map(|gpow| (0..(1 << self.num_active_vars))
+            .map(|i| *gpow * eq[i]))
+            .flatten()
+            .collect();
+
+        let mut q = vec![F128::zero(); N * (1 << self.num_active_vars)];
+        self.matrix.apply_transposed(&gamma_eqs, &mut q);
+        // q(x) = M(pt[0..a], x)
+
+        let mut q_polys = vec![];
+        for _ in 0..N {
+            let tmp = q.split_off(1 << self.num_active_vars);
+            q_polys.push(q);
+            q = tmp;
+        }
+        //sanity:
+        assert_eq!(q.len(), 0);
+
+        let label2 = Instant::now();
+
+        println!("Init - restrict: {} ms", (label2 - label1).as_millis());
+
+        PreparedLincheck{
+            object: Prodcheck::new(p_polys, q_polys, self.initial_claim, false, false)
+        }
     }
 }
 
 pub struct PreparedLincheck {
     object: Prodcheck
+}
+
+impl PreparedLincheck {
+    pub fn finish(self) -> LincheckOutput{
+        self.object.finish()
+    }
+}
+
+impl SumcheckObject for PreparedLincheck {
+    fn is_reverse_order(&self) -> bool {
+        false
+    }
+
+    fn round_msg(&mut self) -> CompressedPoly {
+        self.object.round_msg()
+    }
+
+    fn bind(&mut self, challenge: F128) {
+        self.object.bind(challenge)
+    }
+}
+
+// Final claim of lincheck. Consists of 
+pub type LincheckOutput = ProdcheckOutput;
+
+
+#[cfg(test)]
+mod tests {
+    use std::time::Instant;
+
+    use itertools::Itertools;
+    use rand::rngs::OsRng;
+    use rayon::iter::IndexedParallelIterator;
+    use rayon::slice::ParallelSliceMut;
+
+    use super::*;
+
+    // Arbitrary matrix. We will use it for testing.
+    pub struct GenericLinop {
+        n_in: usize,
+        n_out: usize,
+        entries: Vec<Vec<F128>>,
+    }
+
+    impl GenericLinop {
+        pub fn new(entries: Vec<Vec<F128>>) -> Self {
+            let n_out = entries.len();
+            let n_in = entries[0].len();
+            for i in 1..n_out {
+                assert!(entries[i].len() == n_in);
+            }
+
+            Self { n_in, n_out, entries }
+
+        }
+    }
+
+    impl LinOp for GenericLinop {
+        fn n_in(&self) -> usize {
+            self.n_in
+        }
+    
+        fn n_out(&self) -> usize {
+            self.n_out
+        }
+    
+        fn apply(&self, input: &[F128], output: &mut [F128]) {
+            assert!(input.len() == self.n_in);
+            assert!(output.len() == self.n_out);
+            for i in 0..self.n_out {
+                output[i] = F128::zero();
+            }
+            for i in 0..self.n_in {
+                for j in 0..self.n_out {
+                    output[j] += self.entries[j][i] * input[i];
+                }
+            }
+        }
+    
+        fn apply_transposed(&self, input: &[F128], output: &mut [F128]) {
+            assert!(input.len() == self.n_out);
+            assert!(output.len() == self.n_in);
+            for i in 0..self.n_in {
+                output[i] = F128::zero();
+            }
+            for i in 0..self.n_out {
+                for j in 0..self.n_in {
+                    output[j] += self.entries[i][j] * input[i];
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn generic_matrix() {
+        let rng = &mut OsRng;
+
+        let mut entries = vec![];
+
+        for i in 0..4 {
+            let mut tmp = vec![];
+            for j in 0..5 {
+                tmp.push(F128::rand(rng))
+            }
+            entries.push(tmp);
+        }
+
+        let linop = GenericLinop::new(entries);
+
+        let v : Vec<_> = (0..5).map(|_| F128::rand(rng)).collect();
+        let mut mv = vec![F128::zero(); 4];
+
+        let w : Vec<_> = (0..4).map(|_| F128::rand(rng)).collect();
+        let mut mtw = vec![F128::zero(); 5];
+
+        linop.apply(&v, &mut mv);
+        linop.apply_transposed(&w, &mut mtw);
+
+        let lhs = v.iter().zip_eq(mtw.iter()).map(|(a, b)| *a * b).fold(F128::zero(), |a, b| a + b);
+        let rhs = mv.iter().zip_eq(w.iter()).map(|(a, b)| *a * b).fold(F128::zero(), |a, b| a + b);
+
+        assert!(lhs == rhs);
+
+    }
+
+    #[test]
+    fn lincheck_works() {
+        let rng = &mut OsRng;
+
+        let num_vars = 20;
+        let num_active_vars = 10;
+
+        
+        let mut entries = vec![];
+
+        for i in 0..1 << num_active_vars {
+            let mut tmp = vec![];
+            for j in 0..1 << num_active_vars {
+                tmp.push(F128::rand(rng))
+            }
+            entries.push(tmp);
+        }
+
+        let linop = GenericLinop::new(entries);
+
+        let pt : Vec<_> = (0..num_vars).map(|_| F128::rand(rng)).collect();
+        let poly : Vec<_> = (0 .. 1 << num_vars).map(|_| F128::rand(rng)).collect();
+        let mut l_p : Vec<_> = vec![F128::zero(); 1 << num_vars]; 
+        poly.par_chunks(1 << num_active_vars)
+            .zip(l_p.par_chunks_mut(1 << num_active_vars))
+            .map(|(src, dst)| linop.apply(src, dst)).count();
+        // we will have more efficient witness computation later anyway
+
+        let initial_claim = evaluate(&l_p, &pt);
+
+        let label0 = Instant::now();
+
+        let p_ = poly.clone();
+
+        let label1_5 = Instant::now();
+
+        let prover = Lincheck::<1, 1, _>::new([p_], pt.clone(), linop, num_active_vars, initial_claim);
+
+        let mut prover = prover.folding_challenge(F128::rand(rng));
+
+        let label1 = Instant::now();
+
+        let mut rs = vec![];
+        let mut claim = initial_claim;
+
+        for _ in 0..num_active_vars {
+            let rpoly = prover.round_msg().coeffs(claim);
+            let r = F128::rand(rng);
+            claim = rpoly[0] + rpoly[1] * r + rpoly[2] * r * r;
+            prover.bind(r);
+            rs.push(r);
+        };
+
+        let label2 = Instant::now();
+
+        let LincheckOutput {p_evs, q_evs} = prover.finish();
+
+        let label3 = Instant::now();
+
+        println!("Time elapsed: {} ms", (label3 - label0).as_millis());
+        println!("> Clone: {} ms", (label1_5 - label0).as_millis());
+        println!("> Init: {} ms", (label1 - label1_5).as_millis());
+        println!("> Prodcheck maincycle: {} ms", (label2 - label1).as_millis());
+        println!("> Finish: {} ms", (label3 - label2).as_millis());
+
+
+        rs.extend(pt[num_active_vars..].iter().map(|x| *x));
+        assert!(rs.len() == num_vars);
+
+        assert!(p_evs[0] == evaluate(&poly, &rs));
+
+    }
+
 }
