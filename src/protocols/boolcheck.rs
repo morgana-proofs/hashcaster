@@ -446,7 +446,7 @@ impl<
 mod tests {
     use std::{iter::repeat_with, time::Instant};
     use rand::rngs::OsRng;
-    use crate::{protocols::{andcheck::AndcheckProver, multiclaim::MulticlaimCheck, utils::{eq_poly, evaluate, untwist_evals}}, utils::u128_idx};
+    use crate::{protocols::{multiclaim::MulticlaimCheck, utils::{eq_poly, evaluate, untwist_evals}}, utils::u128_idx};
     use super::*;
 
     fn and_compressed_quad(arg : [F128; 2]) -> [F128; 1] {
@@ -669,12 +669,11 @@ mod tests {
 
         let gamma = F128::rand(rng);
 
-        let mut tmp = F128::one();
-        let mut gamma_pows = Vec::with_capacity(256);
-        for _ in 0..256 {
-            gamma_pows.push(tmp);
-            tmp *= gamma;
+        let mut gamma128 = gamma;
+        for i in 0..7 {
+            gamma128 *= gamma128;
         }
+    
 
         let polys = [p, q];
 
@@ -682,34 +681,36 @@ mod tests {
         let mut instance = instance.folding_challenge(gamma);
         
 
-        let mut current_claim = frob_evals.iter().zip(gamma_pows.iter()).map(|(x, y)| *x * y).fold(F128::zero(), |x, y| x + y);
+        let mut claim = evaluate_univar(&frob_evals, gamma); //.iter().zip(gamma_pows.iter()).map(|(x, y)| *x * y).fold(F128::zero(), |x, y| x + y);
         let mut rs = vec![];
         for i in 0..num_vars {
             let round_poly = instance.round_msg();
             let r = F128::rand(rng);
             rs.push(r);
-            let decomp_rpoly = round_poly.coeffs(current_claim);
-            current_claim = 
+            let decomp_rpoly = round_poly.coeffs(claim);
+            claim = 
                 decomp_rpoly[0] + r * decomp_rpoly[1] + r * r * decomp_rpoly[2];
 
             instance.bind(r);
         }
 
-        let q_ev = evaluate(&polys[1], &rs);
-        let p_ev = instance.object.p_polys[0][0] + gamma_pows[128] * q_ev;
 
-        let eq_evs = 
-            gamma_pows[0..128].iter()
-                .zip(pt_inv_orbit.iter())
-                .map(|(gamma, pt)| *gamma * eq_ev(&pt, &rs))
-                .fold(F128::zero(), |x, y| x + y);
+        let eq_evs : Vec<_> = pt_inv_orbit.iter()
+        .map(|pt| eq_ev(&pt, &rs))
+        .collect();
 
-        let final_claim = instance.finish();
+        let eq_ev = evaluate_univar(&eq_evs, gamma);
 
-        assert!(final_claim == current_claim);
-        assert!((p_ev + gamma_pows[128]*q_ev) * eq_evs == final_claim);
+        let evals = instance.finish();
+
+        let eval = evaluate_univar(&evals, gamma128);
+
+        assert!(eval * eq_ev == claim);
 
         let label2 = Instant::now();
+
+        assert!(evaluate(&polys[0], &rs) == evals[0]);
+        assert!(evaluate(&polys[1], &rs) == evals[1]);
 
         println!("Reduction took: {} ms", (label2-label1).as_millis());
 

@@ -4,7 +4,7 @@ use num_traits::{One, Zero};
 use rayon::iter::{IndexedParallelIterator, IntoParallelRefIterator, IntoParallelRefMutIterator, ParallelIterator};
 use rayon::slice::ParallelSlice;
 
-use crate::protocols::utils::evaluate;
+use crate::protocols::utils::{evaluate, evaluate_univar};
 use crate::traits::{CompressedPoly, SumcheckObject};
 use crate::{field::F128, protocols::utils::eq_poly,};
 
@@ -138,11 +138,11 @@ pub struct Lincheck<const N: usize, const M: usize, L: LinOp> {
     pt: Vec<F128>,
     num_vars: usize,
     num_active_vars: usize,
-    initial_claim: F128,
+    initial_claims: [F128; M],
 }
 
 impl<const N: usize, const M: usize, L: LinOp> Lincheck<N, M, L> {
-    pub fn new(polys: [Vec<F128>; N], pt: Vec<F128>, matrix: L, num_active_vars: usize, initial_claim: F128) -> Self {
+    pub fn new(polys: [Vec<F128>; N], pt: Vec<F128>, matrix: L, num_active_vars: usize, initial_claims: [F128; M]) -> Self {
         assert!(matrix.n_in() == N * (1 << num_active_vars));
         assert!(matrix.n_out() == M * (1 << num_active_vars));
         let num_vars = pt.len();
@@ -150,7 +150,7 @@ impl<const N: usize, const M: usize, L: LinOp> Lincheck<N, M, L> {
         for i in 0..N {
             assert!(polys[i].len() == 1 << num_vars);
         }
-        Self { matrix, polys, pt, num_vars, num_active_vars, initial_claim }
+        Self { matrix, polys, pt, num_vars, num_active_vars, initial_claims }
     } 
 
     pub fn folding_challenge(self, gamma: F128) -> PreparedLincheck {
@@ -159,8 +159,6 @@ impl<const N: usize, const M: usize, L: LinOp> Lincheck<N, M, L> {
         let pt_dormant = &self.pt[self.num_active_vars .. ];
         // Restrict.
         
-        let label0 = Instant::now();
-
         let eq_dormant = eq_poly(&pt_dormant);
         let mut p_polys = vec![vec![F128::zero(); 1 << self.num_active_vars]; N];
         
@@ -170,10 +168,6 @@ impl<const N: usize, const M: usize, L: LinOp> Lincheck<N, M, L> {
             poly_chunks.enumerate().map(|(j, chunk)| {
                 p_polys[i].iter_mut().zip(chunk.iter()).map(|(p, c)| *p += eq_dormant[j] * c).count();
         }).count()}).count();
-
-        let label1 = Instant::now();
-
-        println!("Restrict took {} ms", (label1 - label0).as_millis());
 
         let mut gamma_pows = Vec::with_capacity(M);
         let mut tmp = F128::one();
@@ -201,12 +195,10 @@ impl<const N: usize, const M: usize, L: LinOp> Lincheck<N, M, L> {
         //sanity:
         assert_eq!(q.len(), 0);
 
-        let label2 = Instant::now();
-
-        println!("Init - restrict: {} ms", (label2 - label1).as_millis());
+        let claim = evaluate_univar(&self.initial_claims, gamma);
 
         PreparedLincheck{
-            object: Prodcheck::new(p_polys, q_polys, self.initial_claim, false, false)
+            object: Prodcheck::new(p_polys, q_polys, claim, false, false)
         }
     }
 }
@@ -374,7 +366,7 @@ mod tests {
 
         let label1_5 = Instant::now();
 
-        let prover = Lincheck::<1, 1, _>::new([p_], pt.clone(), linop, num_active_vars, initial_claim);
+        let prover = Lincheck::<1, 1, _>::new([p_], pt.clone(), linop, num_active_vars, [initial_claim]);
 
         let mut prover = prover.folding_challenge(F128::rand(rng));
 

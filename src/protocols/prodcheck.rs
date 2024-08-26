@@ -13,7 +13,7 @@ pub struct Prodcheck {
     pub p_polys: Vec<Vec<F128>>,
     pub q_polys: Vec<Vec<F128>>,
     pub claim: F128,
-    challenges: Vec<F128>,
+    pub challenges: Vec<F128>,
     num_vars: usize,
 
     cached_round_msg: Option<CompressedPoly>,
@@ -32,8 +32,6 @@ impl Prodcheck {
         in_reverse_order: bool,
     ) -> Self {
 
-        let start = Instant::now();
-
         let num_vars = log2_exact(p_polys[0].len());
         assert!(p_polys.len() == q_polys.len());
         for i in 0..p_polys.len() {
@@ -51,13 +49,8 @@ impl Prodcheck {
                 }
             } 
 
-
             assert!(initial_claim == expected_claim);
         }
-
-        let end = Instant::now();
-
-        println!("Prodcheck init took: {} ms", (end-start).as_millis());
 
         Self {
             p_polys,

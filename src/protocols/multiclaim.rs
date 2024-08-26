@@ -7,12 +7,14 @@
 
 // We exploit this, by doing the sumcheck in *reverse* order, starting from higher coordinates.
 
+use std::iter::once;
+
 use num_traits::{One, Zero};
 use rayon::iter::{IntoParallelIterator, IntoParallelRefMutIterator, ParallelIterator};
 
 use crate::{field::F128, precompute::frobenius_table::FROBENIUS, protocols::utils::frobenius_inv_lc, traits::{CompressedPoly, SumcheckObject}};
 
-use super::{prodcheck::Prodcheck, utils::eq_poly};
+use super::{prodcheck::Prodcheck, utils::{eq_poly, evaluate, evaluate_univar}};
 
 pub struct MulticlaimCheck<'a, const N: usize> {
     polys: &'a [Vec<F128>; N],
@@ -29,7 +31,7 @@ impl<'a, const N: usize> MulticlaimCheck<'a, N> {
         Self { polys, pt, openings }
     }
 
-    pub fn folding_challenge(self, gamma: F128) -> MulticlaimCheckSingle {
+    pub fn folding_challenge(self, gamma: F128) -> MulticlaimCheckSingle<'a, N> {
         let Self { polys, pt, openings } = self;
     
         let mut gamma_pows = Vec::with_capacity(128 * N);
@@ -62,17 +64,19 @@ impl<'a, const N: usize> MulticlaimCheck<'a, N> {
             o
         }).collect();
 
-        MulticlaimCheckSingle::new(poly, pt, openings, gamma_pows)       
+        MulticlaimCheckSingle::new(poly, pt, openings, gamma_pows, polys)       
 
     }
 }
 
-pub struct MulticlaimCheckSingle {
+pub struct MulticlaimCheckSingle<'a, const N: usize> {
+    polys: &'a [Vec<F128>; N],
+    gamma128: F128,
     pub object: Prodcheck,
 }
 
-impl MulticlaimCheckSingle {
-    pub fn new(poly: Vec<F128>, pt: Vec<F128>, openings: Vec<F128>, gamma_pows: Vec<F128>) -> Self {
+impl<'a, const N: usize> MulticlaimCheckSingle<'a, N> {
+    pub fn new(poly: Vec<F128>, pt: Vec<F128>, openings: Vec<F128>, gamma_pows: Vec<F128>, polys: &'a [Vec<F128>; N]) -> Self {
         let mut eq = eq_poly(&pt);
         // We want to compute sum \gamma_i * eq(Frob^{-i}(r), x)
         // This can be done by applying matrix M_{\gamma} = (sum \gamma_i Frob^{-i}) to eq.
@@ -88,18 +92,23 @@ impl MulticlaimCheckSingle {
                 *initial_claim,
                 false,
                 false
-            )
+            ),
+            polys,
+            gamma128 : gamma_pows[128],
         }
     }
 
-    /// Returns a (batched) opening.
-    pub fn finish(self) -> F128 {
-        self.object.claim
+    /// Returns openings.
+    pub fn finish(self) -> Vec<F128> {
+        let mut ret : Vec<F128> = once(F128::zero()).chain((1..N).map(|i| evaluate(&self.polys[i], &self.object.challenges))).collect();
+        let tmp = evaluate_univar(&ret, self.gamma128);
+        ret[0] = tmp + self.object.p_polys[0][0];
+        ret
     }
 
 }
 
-impl SumcheckObject for MulticlaimCheckSingle {
+impl<'a, const N: usize> SumcheckObject for MulticlaimCheckSingle<'a, N> {
     fn is_reverse_order(&self) -> bool {
         self.object.is_reverse_order()
     }
