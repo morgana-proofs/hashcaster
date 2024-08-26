@@ -7,3 +7,4 @@ pub mod precompute;
 pub mod backend;
 pub mod traits;
 pub mod protocols;
+pub mod examples;

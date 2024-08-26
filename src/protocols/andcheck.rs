@@ -81,7 +81,7 @@ impl AndcheckProver {
         // let p_q_ext = p_ext.par_iter().zip(q_ext.par_iter()).map(|(a, b)| *a & *b).collect();
         // let p_q_ext = extend_2_tables_legacy(&p, &q, pt.len(), phase_switch, &trit_mapping);
         
-        let p_q_ext = extend_n_tables(&[&p, &q], phase_switch, &trit_mapping, |[a, b]| {a & b});
+        let p_q_ext = extend_n_tables(&[&p, &q], phase_switch, &trit_mapping, |[a, b]|{F128::zero()}, |[a, b]| {a & b});
 
         let eq_sequence = eq_poly_sequence(&pt[1..]); // We do not need whole eq, only partials. 
 

@@ -15,12 +15,14 @@ pub trait LinOp {
     fn n_out(&self) -> usize;
     
     /// expects input of size n_in and output of size n_out
+    /// adds result to already existing output using +=
     fn apply(&self, input: &[F128], output: &mut [F128]);
-        /// expects input of size n_out and output of size n_in
+    /// expects input of size n_out and output of size n_in
+    /// adds result to already existing output using +=
     fn apply_transposed(&self, input: &[F128], output: &mut [F128]);
 }
 
-pub struct Composition <A: LinOp, B: LinOp> {
+pub struct Composition<A: LinOp, B: LinOp> {
     a: A,
     b: B,
 }
@@ -56,6 +58,70 @@ impl<A: LinOp, B: LinOp> LinOp for Composition<A, B> {
     }
 }
 
+pub struct MatrixSum<A: LinOp, B: LinOp> {
+    a: A,
+    b: B,
+}
+
+impl<A: LinOp, B: LinOp> MatrixSum<A, B> {
+    pub fn new(a: A, b: B) -> Self {
+        assert!(b.n_in() == a.n_in());
+        assert!(b.n_out() == a.n_out());
+        Self { a, b }
+    }
+}
+
+impl<A: LinOp, B: LinOp> LinOp for MatrixSum<A, B> {
+    fn n_in(&self) -> usize {
+        self.a.n_in()
+    }
+
+    fn n_out(&self) -> usize {
+        self.a.n_out()
+    }
+
+    fn apply(&self, input: &[F128], output: &mut [F128]) {
+        self.a.apply(input, output);
+        self.b.apply(input, output);
+    }
+
+    fn apply_transposed(&self, input: &[F128], output: &mut [F128]) {
+        self.a.apply_transposed(input, output);
+        self.b.apply_transposed(input, output);
+    }
+}
+
+pub struct IdentityMatrix {
+    size: usize,
+}
+
+impl IdentityMatrix {
+    pub fn new(size: usize) -> Self {
+        Self { size }
+    }
+}
+
+impl LinOp for IdentityMatrix {
+    fn n_in(&self) -> usize {
+        self.size
+    }
+
+    fn n_out(&self) -> usize {
+        self.size
+    }
+
+    fn apply(&self, input: &[F128], output: &mut [F128]) {
+        for i in 0..self.size {
+            output[i] += input[i]
+        }
+    }
+
+    fn apply_transposed(&self, input: &[F128], output: &mut [F128]) {
+        for i in 0..self.size {
+            output[i] += input[i]
+        }
+    }
+}
 
 /// Represents a linear sumcheck of the form
 /// M(pt_{n-a}, ... pt_{n-1}; x_{n-a}, ..., x_{n-1}) * P(pt_0, ..., pt_{n-a-1}, x_{n-a}, ..., x_{n-1}),
@@ -184,7 +250,7 @@ mod tests {
 
     use super::*;
 
-    // Arbitrary matrix. We will use it for testing.
+    // Arbitrary matrix. Not efficient. We will use it for testing.
     pub struct GenericLinop {
         n_in: usize,
         n_out: usize,

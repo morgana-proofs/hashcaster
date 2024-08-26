@@ -3,6 +3,74 @@ use rayon::{iter::{IntoParallelIterator, ParallelIterator}, slice::{ParallelSlic
 
 use crate::{field::F128, protocols::utils::{compute_trit_mappings, eq_ev, eq_poly_sequence, extend_n_tables, restrict, restrict_legacy, twist_evals}, ptr_utils::ConstPtr, traits::{CompressedPoly, SumcheckObject}};
 
+use super::utils::evaluate_univar;
+
+
+/// This trait holds all required versions of our function.
+/// Namely, it should be able to separately compute quadratic and linear parts,
+/// and it should be able to compute their algebraic versions.
+pub trait FnPackage<const N: usize, const M: usize> : Send + Sync {
+    /// Executes linear part of the boolean formula.
+    fn exec_lin_compressed(&self, arg: [F128; N]) -> [F128; M];
+    /// Executes quadratic part of the boolean formula.
+    fn exec_quad_compressed(&self, arg: [F128; N]) -> [F128; M];
+    /// Reads 2 arrays of size (128 * N) from data, starting at 2*start, counting with offset, and starting at
+    /// (2*start + 1), counting with offset. Then applies full formula twice - to the first
+    /// array, and to the second array, and the quadratic part to the element-wise sum of these arrays.
+    fn exec_alg(&self, data: &[F128], start: usize, offset: usize) -> [[F128; M]; 3];
+}
+
+pub trait FnPackageFolded<const N: usize> : Send + Sync {
+    fn exec_lin_compressed(&self, arg: [F128; N]) -> F128;
+    fn exec_quad_compressed(&self, arg: [F128; N]) -> F128;
+    fn exec_alg(&self, data: &[F128], start: usize, offset: usize) -> [F128; 3];
+}
+
+/// This explicitly implements a folding closure.
+pub struct FoldWrapper<const N: usize, const M: usize, F: FnPackage<N, M>> {
+    f: F,
+    gammas: [F128; M],
+}
+
+impl<const N: usize, const M: usize, F: FnPackage<N, M>> FoldWrapper<N, M, F> {
+    pub fn new(f: F, gammas: &[F128]) -> Self {
+        assert!(gammas.len() == M);
+        Self{f, gammas : gammas.try_into().unwrap()}
+    }
+}
+
+impl<const N: usize, const M: usize, F: FnPackage<N, M>> FnPackageFolded<N> for FoldWrapper<N, M, F> {
+    fn exec_lin_compressed(&self, arg: [F128; N]) -> F128 {
+        let tmp = self.f.exec_lin_compressed(arg);
+        let mut acc = F128::zero();
+        for i in 0..M {
+            acc += tmp[i] * self.gammas[i];
+        }
+        acc
+    }
+
+    fn exec_quad_compressed(&self, arg: [F128; N]) -> F128 {
+        let tmp = self.f.exec_quad_compressed(arg);
+        let mut acc = F128::zero();
+        for i in 0..M {
+            acc += tmp[i] * self.gammas[i];
+        }
+        acc   
+    }
+
+    fn exec_alg(&self, data: &[F128], start: usize, offset: usize) -> [F128; 3] {
+        let tmp = self.f.exec_alg(data, start, offset);
+        let mut acc = [F128::zero(); 3];
+        for i in 0..M {
+            acc[0] += tmp[0][i] * self.gammas[i];
+            acc[1] += tmp[1][i] *self.gammas[i];
+            acc[2] += tmp[2][i] * self.gammas[i];
+        }
+        acc
+    }
+}
+
+
 /// A check for any quadratic formula depending on coordinates of polynomials.
 /// Good example is any quadratic boolean expression.
 /// f: F computes this formula.
@@ -16,11 +84,9 @@ use crate::{field::F128, protocols::utils::{compute_trit_mappings, eq_ev, eq_pol
 pub struct BoolCheck<
     const N: usize,
     const M: usize,
-    F: Fn([F128; N]) -> [F128; M] + Send + Sync,
-    FA: Fn(&[F128], usize, usize) -> [[F128; M]; 3] + Send + Sync,
+    F: FnPackage<N, M>,
 > {
     f: F,
-    f_alg: FA,
     pt: Vec<F128>,
     polys: [Vec<F128>; N], // Input polynomials.
     c: usize, // PHASE SWITCH, round < c => PHASE 1.
@@ -30,55 +96,33 @@ pub struct BoolCheck<
 impl<
     const N: usize,
     const M: usize,
-    F: Fn([F128; N]) -> [F128; M] + Send + Sync,
-    FA: Fn(&[F128], usize, usize) -> [[F128; M]; 3] + Send + Sync,
-> BoolCheck<N, M, F, FA> {
-
-    pub fn new(f: F, f_alg: FA, polys: [Vec<F128>; N], c: usize, evaluation_claims: [F128; M], pt: Vec<F128>) -> Self {
-        Self{f, f_alg, pt, polys, c, evaluation_claims}
+    F: FnPackage<N, M>,
+> BoolCheck<N, M, F> {
+    pub fn new(f: F, polys: [Vec<F128>; N], c: usize, evaluation_claims: [F128; M], pt: Vec<F128>) -> Self {
+        Self{f, pt, polys, c, evaluation_claims}
     }
 
     /// Folding round. This is an initial message of the verifier.
     pub fn folding_challenge(self, gamma: F128)
      -> BoolCheckSingle<
         N,
-        impl Fn([F128; N]) -> F128 + Send + Sync,
-        impl Fn(&[F128], usize, usize) -> [F128; 3] + Send + Sync,
+        impl FnPackageFolded<N>,
     > {
 
-        let Self { f, f_alg, pt, polys, c, evaluation_claims } = self;
-        let f_folded = move |x : [F128; N]| {
-            let fx = f(x);
-            let mut ret = fx[M-1];
-            for i in 0..M-1 {
-                ret *= gamma;
-                ret += fx[M-2-i];
-            }
-            ret
-        };
-        let f_alg_folded = move |x: &[F128], y, z| {
-            let fx = f_alg(x, y, z);
-            let mut ret = [fx[0][M-1], fx[1][M-1], fx[2][M-1]];
-            for i in 0..M-1 {
-                ret[0] *= gamma;
-                ret[1] *= gamma;
-                ret[2] *= gamma;
-                ret[0] += fx[0][M-2-i];
-                ret[1] += fx[1][M-2-i];
-                ret[2] += fx[2][M-2-i];
-            }
-            ret
-        };
+        let Self { f, pt, polys, c, evaluation_claims } = self;
 
-        let mut evaluation_claim = evaluation_claims[M-1];
-        for i in 0..M-1 {
-            evaluation_claim *= gamma;
-            evaluation_claim += evaluation_claims[M-2-i];
+        let mut gammas = vec![];
+        let mut tmp = F128::one();
+        for _ in 0..M {
+            gammas.push(tmp);
+            tmp *= gamma;
         }
+
+        let f_folded = FoldWrapper::new(f, &gammas);
+        let evaluation_claim = evaluate_univar(&evaluation_claims, gamma);
 
         BoolCheckSingle::new(
             f_folded,
-            f_alg_folded,
             pt,
             polys,
             c,
@@ -91,18 +135,16 @@ impl<
 
 pub struct BoolCheckSingle<
     const N: usize,
-    F: Fn([F128; N]) -> F128 + Send + Sync,
-    FA: Fn(&[F128], usize, usize) -> [F128; 3] + Send + Sync,
+    F: FnPackageFolded<N>,
 > {
     f: F,
-    f_alg: FA,
     pt: Vec<F128>,
 
     polys: [Vec<F128>; N], // Input polynomials.
-    ext: Option<Vec<F128>>, // Extension of output on 3^{c+1} * 2^{n-c-1}, during first phase.
+    pub ext: Option<Vec<F128>>, // Extension of output on 3^{c+1} * 2^{n-c-1}, during first phase.
     poly_coords: Option<Vec<F128>>,
     c: usize, // PHASE SWITCH, round < c => PHASE 1.
-    claim: F128,
+    pub claim: F128,
     challenges: Vec<F128>,
     bits_to_trits_map: Vec<u16>,
     eq_sequence: Vec<Vec<F128>>, // Precomputed eqs of all slices pt[i..].
@@ -112,17 +154,16 @@ pub struct BoolCheckSingle<
 
 #[derive(Clone, Debug)]
 pub struct BoolCheckOutput {
-    frob_evals: Vec<F128>,
-    round_polys: Vec<CompressedPoly>,
+    pub frob_evals: Vec<F128>,
+    pub round_polys: Vec<CompressedPoly>,
 //    cached_poly_coords: Vec<Vec<F128>>,
 }
 
 impl<
     const N: usize,
-    F: Fn([F128; N]) -> F128 + Send + Sync,
-    FA: Fn(&[F128], usize, usize) -> [F128; 3] + Send + Sync,
-> BoolCheckSingle<N, F, FA> {
-    pub fn new(f: F, f_alg: FA, pt: Vec<F128>, polys: [Vec<F128>; N], c: usize, evaluation_claim: F128) -> Self {
+    F: FnPackageFolded<N>,
+> BoolCheckSingle<N, F> {
+    pub fn new(f: F, pt: Vec<F128>, polys: [Vec<F128>; N], c: usize, evaluation_claim: F128) -> Self {
         for poly in polys.iter() {
             assert!(poly.len() == 1 << pt.len());
         }
@@ -133,14 +174,18 @@ impl<
         // A bit of ugly signature juggling to satisfy extend.
         let ext = {
             let polys : Vec<&[F128]>= polys.iter().map(|v|v.as_slice()).collect();
-            extend_n_tables(&polys, c, &trit_mapping, &f)
+            extend_n_tables(
+                &polys,
+                c, &trit_mapping, 
+                |args| f.exec_lin_compressed(args), 
+                |args| f.exec_quad_compressed(args)
+            )
         };
 
         let eq_sequence = eq_poly_sequence(&pt[1..]);
     
         Self {
             f,
-            f_alg,
             pt,
             polys,
             ext : Some(ext),
@@ -184,9 +229,8 @@ impl<
 
 impl<
     const N: usize,
-    F: Fn([F128; N]) -> F128 + Send + Sync,
-    FA: Fn(&[F128], usize, usize) -> [F128; 3] + Send + Sync,
-> SumcheckObject for BoolCheckSingle<N, F, FA> {
+    F: FnPackageFolded<N>
+> SumcheckObject for BoolCheckSingle<N, F> {
 
     fn is_reverse_order(&self) -> bool {
         false
@@ -200,10 +244,10 @@ impl<
         let curr_phase_1 = round <= c;
 
         let rpoly = self.round_msg().coeffs(self.claim);
-        let t2 = t * t;
-        let t3 = t * t * t;
-        self.claim = rpoly[0] + t * rpoly[1] + t2 * rpoly[2] + t3 * rpoly[3];
+        self.claim = evaluate_univar(&rpoly, t);
         self.challenges.push(t);
+
+        let t2 = t * t;
 
         if curr_phase_1 {
             let ext = self.ext.as_mut().unwrap();
@@ -220,7 +264,7 @@ impl<
                 }).collect()
             );
         } else {
-//            let poly_coords = self.poly_coords.last().unwrap();
+            //            let poly_coords = self.poly_coords.last().unwrap();
             let half = 1 << (num_vars - round - 1);
 
             let poly_coords = self.poly_coords.as_mut().unwrap();
@@ -335,12 +379,13 @@ impl<
             ];
 
             let (ret, expected_claim) = CompressedPoly::compress(&poly_final);
-            assert!(expected_claim == self.claim); //sanity check - will eventually be optimized out
+            assert!(expected_claim == self.claim, "Current round: {}", self.curr_round()); //sanity check - will eventually be optimized out
 
             assert!(self.round_polys.len() == round, "Impossible.");
             self.round_polys.push(ret.clone());
             ret
         } else {
+
             let eq_evs = &self.eq_sequence[pt.len() - round - 1];
             let half = eq_evs.len();
             assert!(half == 1 << (num_vars - round - 1));
@@ -349,7 +394,7 @@ impl<
 
             let full = half * 2;
 
-            let f_alg = &self.f_alg;
+            let f_alg = |data, start, offset| {self.f.exec_alg(data, start, offset)};
 
             #[cfg(not(feature = "parallel"))]
             let iter = (0..half).into_iter();
@@ -386,9 +431,11 @@ impl<
             ];
 
             let (ret, expected_claim) = CompressedPoly::compress(&poly_final);
-            assert!(expected_claim == self.claim); //sanity check - will eventually be optimized out
+
+            assert!(expected_claim == self.claim, "Current round: {}", self.curr_round()); //sanity check - will eventually be optimized out
 
             assert!(self.round_polys.len() == round, "Impossible.");
+
             self.round_polys.push(ret.clone());
             ret
         }
@@ -399,11 +446,15 @@ impl<
 mod tests {
     use std::{iter::repeat_with, time::Instant};
     use rand::rngs::OsRng;
-    use crate::protocols::{andcheck::AndcheckProver, multiclaim::MulticlaimCheck, utils::{eq_poly, evaluate, untwist_evals}};
+    use crate::{protocols::{andcheck::AndcheckProver, multiclaim::MulticlaimCheck, utils::{eq_poly, evaluate, untwist_evals}}, utils::u128_idx};
     use super::*;
 
-    fn and_compressed(arg : [F128; 2]) -> [F128; 1] {
+    fn and_compressed_quad(arg : [F128; 2]) -> [F128; 1] {
         [arg[0] & arg[1]]
+    }
+
+    fn and_compressed_lin(arg : [F128; 2]) -> [F128; 1] {
+        [F128::zero()]
     }
 
     fn and_algebraic(data: &[F128], mut idx_a: usize, offset: usize) -> [[F128; 1]; 3] {
@@ -428,6 +479,46 @@ mod tests {
         ret
     }
 
+    pub struct AndPackage{}
+
+    impl FnPackage<2, 1> for AndPackage {
+        fn exec_lin_compressed(&self, arg: [F128; 2]) -> [F128; 1] {
+            and_compressed_lin(arg)
+        }
+    
+        fn exec_quad_compressed(&self, arg: [F128; 2]) -> [F128; 1] {
+            and_compressed_quad(arg)
+        }
+    
+        fn exec_alg(&self, data: &[F128], start: usize, offset: usize) -> [[F128; 1]; 3] {
+            and_algebraic(data, start, offset)
+        }
+    }
+
+
+    #[test]
+    fn and_alg_correct() {
+        let rng = &mut OsRng;
+
+        let input : [F128; 2] = (0..2).map(|_| F128::rand(rng)).collect::<Vec<_>>().try_into().unwrap();
+
+        let lhs = and_compressed_quad(input);
+
+        let mut input_coords = input.iter().map(|x| {
+            (0..128).map(|i| {
+                F128::new(u128_idx(&x.raw(), i))
+            })
+        }).flatten()
+        .collect::<Vec<_>>();
+    
+        input_coords.push(F128::zero());
+
+        let rhs = and_algebraic(&input_coords, 0, 1);
+
+        assert!(rhs[0] == lhs);
+
+    }
+
 
     #[test]
     fn new_andcheck() {
@@ -445,9 +536,12 @@ mod tests {
 
         let phase_switch = 5;
 
+        let f = AndPackage{};
+
+        let start = Instant::now();
+
         let instance = BoolCheck::new(
-            and_compressed, 
-            and_algebraic, 
+            f,  
             [p, q], 
             phase_switch, 
             [evaluation_claim],
@@ -462,7 +556,8 @@ mod tests {
 
         let mut rs = vec![];
 
-        let start = Instant::now();
+        let midlabel = Instant::now();
+
         for i in 0..num_vars {
 
             let round_poly = instance.round_msg();
@@ -491,7 +586,8 @@ mod tests {
 
         let end = Instant::now();
 
-        println!("Time elapsed: {} ms", (end-start).as_millis());
+        println!("Extension time: {} ms", (midlabel-start).as_millis());
+        println!("Total time elapsed: {} ms", (end-start).as_millis());
 
     }
 
@@ -516,11 +612,12 @@ mod tests {
         let pc = p.clone();
         let qc = q.clone();
 
+        let f = AndPackage{};
+
         let label0 = Instant::now();
 
         let instance = BoolCheck::new(
-            and_compressed, 
-            and_algebraic, 
+            f,
             [pc, qc], 
             phase_switch, 
             [evaluation_claim],

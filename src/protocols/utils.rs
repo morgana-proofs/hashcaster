@@ -131,6 +131,16 @@ pub fn evaluate(poly: &[F128], pt: &[F128]) -> F128 {
     ret
 }
 
+pub fn evaluate_univar(poly: &[F128], at: F128) -> F128 {
+    let l = poly.len();
+    let mut ret = poly[l-1];
+    for i in 0..l-1 {
+        ret *= at;
+        ret += poly[l-2-i];
+    }
+    ret
+}
+
 pub fn bits_to_trits(mut x: usize) -> usize {
     let mut multiplier = 1;
     let mut ret = 0;
@@ -142,7 +152,14 @@ pub fn bits_to_trits(mut x: usize) -> usize {
     ret
 }
 
-
+/// Returns some useful mappings.
+/// Trit mapping is an array of size 3^(c+1). For an index which has a digit 2 in ternary,
+/// it has a value = 3^k, where k is index of the corresponding (largest) digit. I.e. i - trit_mapping[i]
+/// will set this digit to 1, and i - 2*trit_mapping[i] will set this digit to 0.
+/// 
+/// For values not of this form, it returns 2 * binary number with the same digits (multiplier 2 is added
+/// to always differentiate from the first case). bin_mapping is a reverse map, i.e. it maps number with some
+/// binary decomposition into ternary number with same digits.
 pub fn compute_trit_mappings(c: usize)  -> (Vec<u16>, Vec<u16>) {
     let pow3 = 3usize.pow((c+1) as u32);
     
@@ -320,11 +337,16 @@ pub fn extend_2_tables_legacy(p: &[F128], q: &[F128], dims: usize, c: usize, tri
 /// For standard value of c, it gives 8Kb.
 /// Depending on cache size, one should switch to separate extension if amount of tables is too large, for 128kb cache
 /// I recommend doing it for > ~10, to be on a safe side.
-pub fn extend_n_tables<const N: usize, F: Fn([F128; N]) -> F128 + Send + Sync>(
+pub fn extend_n_tables<
+    const N: usize,
+    F_LIN: Fn([F128; N]) -> F128 + Send + Sync,
+    F_QUAD: Fn([F128; N]) -> F128 + Send + Sync,
+>(
     tables: &[&[F128]],
     c: usize,
     trit_mapping: &[u16],
-    f: F
+    f_lin: F_LIN,
+    f_quad: F_QUAD,
 ) -> Vec<F128> {
     assert!(tables.len() == N);
     let dims = log2_exact(tables[0].len());
@@ -380,6 +402,7 @@ pub fn extend_n_tables<const N: usize, F: Fn([F128; N]) -> F128 + Send + Sync>(
                              *table_z.get(global_tab_offset + (offset >> 1));
                          args[z] = (*table_ext_z.get(global_ext_offset + j));
                     }
+                    *ret_ptr.get_mut(global_ret_offset + j) = f_quad(args) + f_lin(args);
                 } else {
                     for z in 0..N {
                         let table_ext_z = *(table_ext_ptrs.get(z));
@@ -388,8 +411,8 @@ pub fn extend_n_tables<const N: usize, F: Fn([F128; N]) -> F128 + Send + Sync>(
                              (*table_ext_z.get(global_ext_offset + j - 2 * offset));
                         args[z] = (*table_ext_z.get(global_ext_offset + j));
                     }
+                    *ret_ptr.get_mut(global_ret_offset + j) = f_quad(args);
                 }
-                *ret_ptr.get_mut(global_ret_offset + j) = f(args);
             }
 
             for j in pow3_adj..pow3 {
@@ -401,7 +424,7 @@ pub fn extend_n_tables<const N: usize, F: Fn([F128; N]) -> F128 + Send + Sync>(
                         (*table_ext_z.get(global_ext_offset + j - 2 * offset))
                     ;
                 }
-                *ret_ptr.get_mut(global_ret_offset + j) = f(args);
+                *ret_ptr.get_mut(global_ret_offset + j) = f_quad(args);
             }
         }).count();
         
