@@ -205,7 +205,7 @@ pub fn main_protocol() {
     };
 
 
-    let LincheckOutput {p_evs: l0_evals, q_evs} = prover.finish();
+    let LincheckOutput {p_evs: l0_evals, ..} = prover.finish();
 
     assert!(l0_evals.len() == 5);
 
@@ -233,11 +233,11 @@ pub fn main_protocol() {
     }
 
     let expected_claim = l0_evals.iter()
-        .zip_eq(q_evs.iter())
+        .zip_eq(eq_evals.iter())
         .map(|(a, b)| *a * b)
         .fold(F128::zero(), |a, b| a + b);
 
-    assert!(q_evs == eq_evals); // Final check of linear layer.
+    assert!(expected_claim == claim); // Final check of linear layer.
 
     let linlayer_end = Instant::now();
 
