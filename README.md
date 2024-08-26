@@ -3,6 +3,8 @@
 This repository contains demonstration of technique of batched small-field sumcheck using Frobenius twists. My mathematical notes are currently in disarray, but I will try to provide extensive commentary.
 I hope that following the code you will be able to figure the rest out, and article will be published when I catch my breath.
 
+For now, you can check article stub here: https://hackmd.io/@levs57/SJ4fuZMD0
+
 ## Installation instructions
 
 Clone repository, switch to nightly, and run
