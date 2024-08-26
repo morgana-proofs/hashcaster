@@ -243,6 +243,7 @@ mod tests {
     use super::*;
 
     // Arbitrary matrix. Not efficient. We will use it for testing.
+    #[derive(Clone)]
     pub struct GenericLinop {
         n_in: usize,
         n_out: usize,
@@ -366,7 +367,7 @@ mod tests {
 
         let label1_5 = Instant::now();
 
-        let prover = Lincheck::<1, 1, _>::new([p_], pt.clone(), linop, num_active_vars, [initial_claim]);
+        let prover = Lincheck::<1, 1, _>::new([p_], pt.clone(), linop.clone(), num_active_vars, [initial_claim]);
 
         let mut prover = prover.folding_challenge(F128::rand(rng));
 
@@ -387,6 +388,27 @@ mod tests {
 
         let LincheckOutput {p_evs, q_evs} = prover.finish();
 
+        let eq1 = eq_poly(&pt[..num_active_vars]);
+        let eq0 = eq_poly(&rs);
+        let mut adj_eq_vec = vec![];
+    
+        let mut mult = F128::one();
+        for i in 0..1 {
+            adj_eq_vec.extend(eq1.iter().map(|x| *x * mult));
+        };
+        let mut target = vec![F128::zero(); 1 << num_active_vars];
+
+        linop.apply_transposed(&eq1, &mut target);
+    
+        let s = target.iter()
+            .zip(eq0.iter())
+            .map(|(a, b)| *a * b)
+            .fold(F128::zero(), |a, b| a + b);
+
+        assert!(q_evs[0] == s);
+
+        assert!(p_evs[0] * q_evs[0] == claim);
+
         let label3 = Instant::now();
 
         println!("Time elapsed: {} ms", (label3 - label0).as_millis());
@@ -394,7 +416,6 @@ mod tests {
         println!("> Init: {} ms", (label1 - label1_5).as_millis());
         println!("> Prodcheck maincycle: {} ms", (label2 - label1).as_millis());
         println!("> Finish: {} ms", (label3 - label2).as_millis());
-
 
         rs.extend(pt[num_active_vars..].iter().map(|x| *x));
         assert!(rs.len() == num_vars);

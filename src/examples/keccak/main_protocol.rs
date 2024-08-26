@@ -12,9 +12,10 @@
 
 use std::time::Instant;
 
-use num_traits::Zero;
+use itertools::Itertools;
+use num_traits::{One, Zero};
 use rand::rngs::OsRng;
-use crate::{examples::keccak::{chi_round::{chi_round_witness, ChiPackage}, matrices::{keccak_linround_witness, KeccakLinMatrix}}, field::F128, protocols::{boolcheck::{BoolCheck, BoolCheckOutput, FnPackage}, lincheck::{Lincheck, LincheckOutput}, multiclaim::MulticlaimCheck, utils::{eq_ev, evaluate, evaluate_univar, untwist_evals}}, traits::SumcheckObject};
+use crate::{examples::keccak::{chi_round::{chi_round_witness, ChiPackage}, matrices::{keccak_linround_witness, KeccakLinMatrix}}, field::F128, protocols::{boolcheck::{BoolCheck, BoolCheckOutput, FnPackage}, lincheck::{LinOp, Lincheck, LincheckOutput}, multiclaim::MulticlaimCheck, utils::{eq_ev, eq_poly, evaluate, evaluate_univar, untwist_evals}}, traits::SumcheckObject};
 
 #[test]
 pub fn main_protocol() {
@@ -109,7 +110,7 @@ pub fn main_protocol() {
     let claimed_ev = ChiPackage{}.exec_alg(&coord_evals, 0, 1)[0];
     
     let folded_claimed_ev = evaluate_univar(&claimed_ev, gamma);
-    assert!(folded_claimed_ev * eq_ev(&pt, &rs) == claim);
+    assert!(folded_claimed_ev * eq_ev(&pt, &rs) == claim); // Boolcheck final check.
 
     let boolcheck_final_verify = Instant::now();
 
@@ -133,13 +134,6 @@ pub fn main_protocol() {
         )
     }
     pt_inv_orbit.reverse();
-
-    let mut pt_inv_orbit_2 = vec![];
-    for i in 0..128i32 {
-        pt_inv_orbit_2.push(
-            pt.iter().map(|x| x.frob(-i)).collect::<Vec<F128>>()
-        )
-    };
 
     let prover = MulticlaimCheck::new(&layer1, pt.clone(), frob_evals.clone());
     
@@ -173,7 +167,7 @@ pub fn main_protocol() {
     let eq_ev = evaluate_univar(&eq_evs, gamma);
     let eval = evaluate_univar(&evals, gamma128);
 
-    assert!(eval * eq_ev == claim);
+    assert!(eval * eq_ev == claim); // Multiopen final check.
 
     let multiopen_end = Instant::now();
 
@@ -210,12 +204,44 @@ pub fn main_protocol() {
         rs.push(r);
     };
 
-    rs.extend(pt[num_active_vars..].iter().map(|x| *x));
-    let LincheckOutput {p_evs: l0_evals, ..} = prover.finish();
+
+    let LincheckOutput {p_evs: l0_evals, q_evs} = prover.finish();
 
     assert!(l0_evals.len() == 5);
 
+    let eq1 = eq_poly(&pt[..num_active_vars]);
+    let eq0 = eq_poly(&rs);
+    let mut adj_eq_vec = vec![];
+
+    let mut mult = F128::one();
+    for i in 0..5 {
+        adj_eq_vec.extend(eq1.iter().map(|x| *x * mult));
+        mult *= gamma;
+    }
+    let m = KeccakLinMatrix::new();
+
+    let mut target = vec![F128::zero(); 5 * (1 << num_active_vars)];
+    m.apply_transposed(&adj_eq_vec, &mut target);
+
+    let mut eq_evals = vec![];
+    for i in 0..5 {
+        eq_evals.push(
+            target[i * (1 << num_active_vars) .. (i + 1) * (1 << num_active_vars)].iter()
+                .zip(eq0.iter())
+                .map(|(a, b)| *a * b)
+                .fold(F128::zero(), |a, b| a + b));
+    }
+
+    let expected_claim = l0_evals.iter()
+        .zip_eq(q_evs.iter())
+        .map(|(a, b)| *a * b)
+        .fold(F128::zero(), |a, b| a + b);
+
+    assert!(q_evs == eq_evals); // Final check of linear layer.
+
     let linlayer_end = Instant::now();
+
+    rs.extend(pt[num_active_vars..].iter().map(|x| *x));
 
     for i in 0..5 {
         assert!(evaluate(&layer0[i], &rs) == l0_evals[i]);

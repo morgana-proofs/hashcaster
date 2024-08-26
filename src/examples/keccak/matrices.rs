@@ -308,20 +308,31 @@ pub fn keccak_linround_witness(input: [&[F128]; 5]) -> [Vec<F128>; 5] {
 
     let nbatches = l / 1024;
 
-    let mut input_state = vec![F128::zero(); 1600];
-    let mut output_state = vec![F128::zero(); 1600];
+    let mut input_state = vec![vec![F128::zero(); 1600]; 3];
 
     let mut output = vec![vec![F128::zero(); l]; 5];
 
-    for i in 0 .. nbatches {
-        for j in 0 .. 3 {
-            for k in 0 .. 5 {
-                input_state[320 * k .. 320 * (k + 1)].copy_from_slice(&input[k][i * 1024 + j*320 .. i * 1024 + (j + 1) * 320]);
+    for batch_index in 0 .. nbatches {
+        for i in 0..5 {
+            for j in 0..3 {
+                input_state[j][i * 320 .. (i + 1) * 320].copy_from_slice(
+                    &input[i][batch_index * 1024 + j * 320 .. batch_index * 1024 + (j + 1) * 320]
+                );
             }
-            m.apply(&input_state, &mut output_state);
-            for k in 0 .. 5 {
-                output[k][i * 1024 + j*320 .. i * 1024 + (j + 1) * 320].copy_from_slice(&output_state[320 * k .. 320 * (k + 1)]);
-            }        
+        }
+
+        let mut output_state = vec![vec![F128::zero(); 1600]; 3];
+
+        for j in 0..3 {
+            m.apply(&input_state[j], &mut output_state[j]);
+        }
+
+        for i in 0..5 {
+            for j in 0..3 {
+                output[i][batch_index * 1024 + j * 320 .. batch_index * 1024 + (j + 1) * 320].copy_from_slice(
+                    &output_state[j][i * 320 .. (i + 1) * 320]
+                );
+            }
         }
     }
 
@@ -332,6 +343,7 @@ pub fn keccak_linround_witness(input: [&[F128]; 5]) -> [Vec<F128>; 5] {
 mod tests {
     use std::time::Instant;
 
+    use itertools::Itertools;
     use num_traits::Zero;
     use rand::rngs::OsRng;
     use crate::{protocols::{lincheck::{Lincheck, LincheckOutput}, utils::{evaluate, evaluate_univar}}, traits::SumcheckObject};
@@ -422,6 +434,13 @@ mod tests {
         println!("> Init: {} ms", (label3 - label2).as_millis());
         println!("> Prodcheck maincycle: {} ms", (label4 - label3).as_millis());
         println!("> Finish: {} ms", (label5 - label4).as_millis());
+
+        let expected_claim = p_evs.iter()
+            .zip_eq(q_evs.iter())
+            .map(|(a, b)| *a * b)
+            .fold(F128::zero(), |a, b| a + b);
+
+        assert!(expected_claim == claim);
 
 
         rs.extend(pt[num_active_vars..].iter().map(|x| *x));
