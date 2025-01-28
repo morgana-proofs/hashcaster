@@ -94,7 +94,7 @@ impl<'a, const N: usize> MulticlaimCheckSingle<'a, N> {
                 false
             ),
             polys,
-            gamma128 : gamma_pows[128],
+            gamma128 : gamma_pows[127]*gamma_pows[1], // because gamma_pows[128] will not exist for N=1
         }
     }
 

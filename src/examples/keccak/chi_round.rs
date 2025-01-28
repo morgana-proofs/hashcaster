@@ -176,7 +176,7 @@ mod tests {
 
         let lhs_a = chi_compressed(input_a);
         let lhs_b = chi_compressed(input_b);
-        let lhs_ab = chi_compressed(input_a.iter().zip(input_b.iter()).map(|(a, b)| *a + b).collect::<Vec<_>>().try_into().unwrap());
+        let lhs_ab = chi_quad_compressed(input_a.iter().zip(input_b.iter()).map(|(a, b)| *a + b).collect::<Vec<_>>().try_into().unwrap());
 
         let data = input_a.iter().map(|x| {
             (0..128).map(|i| {
