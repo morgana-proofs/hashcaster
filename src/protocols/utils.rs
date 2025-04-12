@@ -72,7 +72,7 @@ pub fn eq_poly(pt: &[F128]) -> Vec<F128> {
 
             let half = 1 << i;
             #[cfg(not(feature = "parallel"))]
-            let iter = (0 .. (1 << half)).into_iter();
+            let iter = (0 .. half).into_iter();
 
             #[cfg(feature = "parallel")]
             let iter = (0 .. half).into_par_iter();
