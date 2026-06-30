@@ -67,38 +67,6 @@ pub fn eq_poly(pt: &[F128], ret: &mut [F128]) {
     }
 }
 
-pub fn eq_poly_sequence(pt: &[F128], ret: &mut [Vec<F128>]) {
-    let l = pt.len();
-    assert!(ret.len() == l + 1);
-    assert!(ret[0].len() == 1);
-    ret[0][0] = F128::one();
-
-    for i in 1..(l+1) {
-        let (prefix, suffix) = ret.split_at_mut(i);
-        let last = &prefix[i-1];
-        let multiplier = pt[l-i];
-        let incoming = &mut suffix[0];
-        assert!(incoming.len() == 1 << i);
-        let ptr = incoming.as_shared_mut_ptr();
-
-        #[cfg(not(feature = "parallel"))]
-        let iter = (0 .. (1 << (i-1))).into_iter();
-
-        #[cfg(feature = "parallel")]
-        let iter = (0 .. 1 << (i-1)).into_par_iter();
-
-        iter.map(|j|{
-            unsafe{
-                let w = last[j];
-                let m = multiplier * w;
-                * ptr.get_mut(2*j) = w + m;
-                * ptr.get_mut(2*j + 1) = m;
-            }
-        }).count();
-    }
-}
-
-
 pub fn eq_ev(x: &[F128], y: &[F128]) -> F128 {
     x.iter().zip_eq(y.iter()).fold(F128::one(), |acc, (x, y)| acc * (F128::one() + x + y))
 }

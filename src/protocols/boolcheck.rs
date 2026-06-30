@@ -1,7 +1,7 @@
 use num_traits::{One, Zero};
-use rayon::{iter::{IntoParallelIterator, ParallelIterator}, slice::{ParallelSlice, ParallelSliceMut}};
+use rayon::{iter::{IntoParallelIterator, ParallelIterator}, slice::ParallelSliceMut};
 
-use crate::{field::F128, protocols::utils::{compute_trit_mappings, eq_ev, eq_poly_sequence, extend_n_tables, restrict, twist_evals}, ptr_utils::{AsSharedMutPtr, ConstPtr, UnsafeIndexRawMut}, traits::{CompressedPoly, SumcheckObject}};
+use crate::{field::F128, protocols::utils::{compute_trit_mappings, eq_ev, extend_n_tables, restrict, twist_evals}, ptr_utils::{AsSharedMutPtr, UnsafeIndexRawMut}, traits::{CompressedPoly, SumcheckObject}};
 
 use super::utils::evaluate_univar;
 
@@ -70,6 +70,21 @@ impl<const N: usize, const M: usize, F: FnPackage<N, M>> FnPackageFolded<N> for 
     }
 }
 
+fn fill_eq_table(point: &[F128], out: &mut [F128]) {
+    assert!(out.len() >= 1 << point.len());
+    out[0] = F128::one();
+    let mut active_len = 1;
+    for &r in point {
+        for i in 0..active_len {
+            let v = out[i];
+            let m = v * r;
+            out[i] = v + m;
+            out[i + active_len] = m;
+        }
+        active_len *= 2;
+    }
+}
+
 
 /// A check for any quadratic formula depending on coordinates of polynomials.
 /// Good example is any quadratic boolean expression.
@@ -105,7 +120,7 @@ impl<
     }
 
     /// Folding round. This is an initial message of the verifier.
-    pub fn folding_challenge(self, gamma: F128, ext: Vec<F128>, ext_scratch: Vec<F128>, mut tables_ext: Vec<Vec<F128>>, eq_sequence: Vec<Vec<F128>>, poly_coords: Vec<F128>, restrict_eq: Vec<F128>, restrict_eq_sums: Vec<F128>)
+    pub fn folding_challenge(self, gamma: F128, ext: Vec<F128>, ext_scratch: Vec<F128>, mut tables_ext: Vec<Vec<F128>>, tail_eq_low: Vec<F128>, tail_eq_high: Vec<F128>, poly_coords: Vec<F128>, restrict_eq: Vec<F128>, restrict_eq_sums: Vec<F128>)
      -> BoolCheckSingle<
         'a,
         N,
@@ -133,7 +148,8 @@ impl<
             ext,
             ext_scratch,
             &mut tables_ext,
-            eq_sequence,
+            tail_eq_low,
+            tail_eq_high,
             poly_coords,
             restrict_eq,
             restrict_eq_sums,
@@ -156,13 +172,14 @@ pub struct BoolCheckSingle<
     ext_scratch: Option<Vec<F128>>,
     ext_len: usize,
     poly_coords: Option<Vec<F128>>,
+    tail_eq_low: Vec<F128>,
+    tail_eq_high: Vec<F128>,
     restrict_eq: Vec<F128>,
     restrict_eq_sums: Vec<F128>,
     c: usize, // PHASE SWITCH, round < c => PHASE 1.
     pub claim: F128,
     challenges: Vec<F128>,
     bits_to_trits_map: Vec<u16>,
-    eq_sequence: Vec<Vec<F128>>, // Precomputed eqs of all slices pt[i..].
 
     round_polys: Vec<CompressedPoly>,
 }
@@ -179,12 +196,14 @@ impl<
     const N: usize,
     F: FnPackageFolded<N>,
 > BoolCheckSingle<'a, N, F> {
-    pub fn new(f: F, pt: Vec<F128>, polys: &'a [Vec<F128>; N], c: usize, evaluation_claim: F128, mut ext: Vec<F128>, ext_scratch: Vec<F128>, tables_ext: &mut [Vec<F128>], mut eq_sequence: Vec<Vec<F128>>, poly_coords: Vec<F128>, restrict_eq: Vec<F128>, restrict_eq_sums: Vec<F128>) -> Self {
+    pub fn new(f: F, pt: Vec<F128>, polys: &'a [Vec<F128>; N], c: usize, evaluation_claim: F128, mut ext: Vec<F128>, ext_scratch: Vec<F128>, tables_ext: &mut [Vec<F128>], tail_eq_low: Vec<F128>, tail_eq_high: Vec<F128>, poly_coords: Vec<F128>, restrict_eq: Vec<F128>, restrict_eq_sums: Vec<F128>) -> Self {
         for poly in polys.iter() {
             assert!(poly.len() == 1 << pt.len());
         }
         assert!(c < pt.len());
         assert!(ext_scratch.len() == ext.len());
+        assert!(tail_eq_low.len() >= 1 << ((pt.len() + 1) / 2));
+        assert!(tail_eq_high.len() >= (1 << ((pt.len() + 1) / 2)).max(1 << (pt.len() - c - 1)));
         assert!(poly_coords.len() == N * 128 * (1 << (pt.len() - c - 1)));
         assert!(restrict_eq.len() == 1 << (c + 1));
         assert!(restrict_eq_sums.len() == 256 * restrict_eq.len() / 8);
@@ -205,7 +224,6 @@ impl<
             ext
         };
 
-        eq_poly_sequence(&pt[1..], &mut eq_sequence);
         let ext_len = 3usize.pow((c + 1) as u32) * (1 << (pt.len() - c - 1));
     
         Self {
@@ -216,15 +234,24 @@ impl<
             ext_scratch: Some(ext_scratch),
             ext_len,
             poly_coords : Some(poly_coords),
+            tail_eq_low,
+            tail_eq_high,
             restrict_eq,
             restrict_eq_sums,
             c,
             claim: evaluation_claim,
             challenges : vec![],
             bits_to_trits_map : bit_mapping,
-            eq_sequence,
             round_polys: vec![]
         }
+    }
+
+    fn prepare_tail_eq(&mut self, round: usize, low_bits: usize) -> (usize, usize, usize) {
+        let tail = &self.pt[(round + 1)..];
+        let high_bits = tail.len() - low_bits;
+        fill_eq_table(&tail[..low_bits], &mut self.tail_eq_low);
+        fill_eq_table(&tail[low_bits..], &mut self.tail_eq_high);
+        (low_bits, 1 << low_bits, 1 << high_bits)
     }
 
     pub fn curr_round(&self) -> usize {
@@ -355,6 +382,11 @@ impl<
         }
         
         let curr_phase_1 = round <= c;
+        let tail_len = num_vars - round - 1;
+        let tail_low_bits_for_round = if curr_phase_1 { c - round } else { tail_len.min(5) };
+        let (tail_low_bits, tail_low_len, tail_high_len) = self.prepare_tail_eq(round, tail_low_bits_for_round);
+        let tail_eq_low = &self.tail_eq_low[..tail_low_len];
+        let tail_eq_high = &self.tail_eq_high[..tail_high_len];
 
         let pt = &self.pt;
 
@@ -367,40 +399,44 @@ impl<
             // PHASE 1:
             let ext = self.ext.as_ref().unwrap();
 
-            let eq_evs = &self.eq_sequence[num_vars - round - 1]; // eq(x, pt_{>})
             let phase1_dims = c - round;
             let pow3 = 3usize.pow(phase1_dims as u32);
+            let phase1_mask = (1 << phase1_dims) - 1;
 
             #[cfg(not(feature = "parallel"))]
             let mut poly_deg_2 =
-            (0 .. (1 << (num_vars - c - 1))).into_iter().map(|i| {
+            (0 .. tail_high_len).into_iter().map(|hi| {
                 let mut pd2_part = [F128::zero(), F128::zero(), F128::zero()];
-                for j in 0..(1 << phase1_dims) {
-                    let index = (i << phase1_dims) + j;
+                for lo in 0..tail_low_len {
+                    let index = (hi << tail_low_bits) + lo;
+                    let i = index >> phase1_dims;
+                    let j = index & phase1_mask;
                     let offset = 3 * (i * pow3 + self.bits_to_trits_map[j] as usize);
-                    let multiplier = eq_evs[index];
+                    let multiplier = tail_eq_low[lo];
                     pd2_part[0] += ext[offset] * multiplier;
                     pd2_part[1] += ext[offset + 1] * multiplier;
                     pd2_part[2] += ext[offset + 2] * multiplier;
                 }
-                pd2_part
+                pd2_part.map(|x| x * tail_eq_high[hi])
             }).fold([F128::zero(), F128::zero(), F128::zero()], |a, b|{
                 [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
             });
    
             #[cfg(feature = "parallel")]
             let mut poly_deg_2 =
-            (0 .. (1 << (num_vars - c - 1))).into_par_iter().map(|i| {
+            (0 .. tail_high_len).into_par_iter().map(|hi| {
                 let mut pd2_part = [F128::zero(), F128::zero(), F128::zero()];
-                for j in 0..(1 << phase1_dims) {
-                    let index = (i << phase1_dims) + j;
+                for lo in 0..tail_low_len {
+                    let index = (hi << tail_low_bits) + lo;
+                    let i = index >> phase1_dims;
+                    let j = index & phase1_mask;
                     let offset = 3 * (i * pow3 + self.bits_to_trits_map[j] as usize);
-                    let multiplier = eq_evs[index];
+                    let multiplier = tail_eq_low[lo];
                     pd2_part[0] += ext[offset] * multiplier;
                     pd2_part[1] += ext[offset + 1] * multiplier;
                     pd2_part[2] += ext[offset + 2] * multiplier;
                 }
-                pd2_part
+                pd2_part.map(|x| x * tail_eq_high[hi])
             }).reduce(||{[F128::zero(), F128::zero(), F128::zero()]}, |a, b|{
                 [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
             });
@@ -435,24 +471,30 @@ impl<
             ret
         } else {
 
-            let eq_evs = &self.eq_sequence[pt.len() - round - 1];
-            let half = eq_evs.len();
+            let half = tail_low_len * tail_high_len;
             assert!(half == 1 << (num_vars - round - 1));
 
             let poly_coords = self.poly_coords.as_ref().unwrap();
 
-            let full = half * 2;
-
             let f_alg = |data, start, offset| {self.f.exec_alg(data, start, offset)};
 
             #[cfg(not(feature = "parallel"))]
-            let iter = (0..half).into_iter();
+            let iter = (0..tail_high_len).into_iter();
 
             #[cfg(feature = "parallel")]
-            let iter = (0..half).into_par_iter();
+            let iter = (0..tail_high_len).into_par_iter();
 
-            let iter = iter.map(|i| {
-                f_alg(poly_coords, i, (1 << (num_vars - c - 1))).map(|x| x * eq_evs[i])
+            let iter = iter.map(|hi| {
+                let mut pd2_part = [F128::zero(), F128::zero(), F128::zero()];
+                for lo in 0..tail_low_len {
+                    let i = (hi << tail_low_bits) + lo;
+                    let multiplier = tail_eq_low[lo];
+                    let part = f_alg(poly_coords, i, 1 << (num_vars - c - 1));
+                    pd2_part[0] += part[0] * multiplier;
+                    pd2_part[1] += part[1] * multiplier;
+                    pd2_part[2] += part[2] * multiplier;
+                }
+                pd2_part.map(|x| x * tail_eq_high[hi])
             });
 
             #[cfg(not(feature = "parallel"))]
@@ -608,11 +650,12 @@ mod tests {
         let ext = vec![F128::zero(); pow3 * pow2];
         let ext_scratch = vec![F128::zero(); pow3 * pow2];
         let tables_ext : Vec<Vec<F128>> = (0..2).map(|_| vec![F128::zero(); pow3_adj * pow2]).collect();
-        let eq_sequence = (0..num_vars).map(|i| vec![F128::zero(); 1 << i]).collect();
+        let tail_eq_low = vec![F128::zero(); 1 << ((num_vars + 1) / 2)];
+        let tail_eq_high = vec![F128::zero(); (1 << ((num_vars + 1) / 2)).max(1 << (num_vars - phase_switch - 1))];
         let poly_coords = vec![F128::zero(); 2 * 128 * (1 << (num_vars - phase_switch - 1))];
         let restrict_eq = vec![F128::zero(); 1 << (phase_switch + 1)];
         let restrict_eq_sums = vec![F128::zero(); 256 * restrict_eq.len() / 8];
-        let mut instance = instance.folding_challenge(gamma, ext, ext_scratch, tables_ext, eq_sequence, poly_coords, restrict_eq, restrict_eq_sums);
+        let mut instance = instance.folding_challenge(gamma, ext, ext_scratch, tables_ext, tail_eq_low, tail_eq_high, poly_coords, restrict_eq, restrict_eq_sums);
 
         let mut current_claim = evaluation_claim;
 
@@ -695,11 +738,12 @@ mod tests {
         let ext = vec![F128::zero(); pow3 * pow2];
         let ext_scratch = vec![F128::zero(); pow3 * pow2];
         let tables_ext : Vec<Vec<F128>> = (0..2).map(|_| vec![F128::zero(); pow3_adj * pow2]).collect();
-        let eq_sequence = (0..num_vars).map(|i| vec![F128::zero(); 1 << i]).collect();
+        let tail_eq_low = vec![F128::zero(); 1 << ((num_vars + 1) / 2)];
+        let tail_eq_high = vec![F128::zero(); (1 << ((num_vars + 1) / 2)).max(1 << (num_vars - phase_switch - 1))];
         let poly_coords = vec![F128::zero(); 2 * 128 * (1 << (num_vars - phase_switch - 1))];
         let restrict_eq = vec![F128::zero(); 1 << (phase_switch + 1)];
         let restrict_eq_sums = vec![F128::zero(); 256 * restrict_eq.len() / 8];
-        let mut instance = instance.folding_challenge(gamma, ext, ext_scratch, tables_ext, eq_sequence, poly_coords, restrict_eq, restrict_eq_sums);
+        let mut instance = instance.folding_challenge(gamma, ext, ext_scratch, tables_ext, tail_eq_low, tail_eq_high, poly_coords, restrict_eq, restrict_eq_sums);
 
         let mut current_claim = evaluation_claim;
 

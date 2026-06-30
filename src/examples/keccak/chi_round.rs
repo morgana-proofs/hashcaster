@@ -231,11 +231,12 @@ mod tests {
         let ext = vec![F128::zero(); pow3 * pow2];
         let ext_scratch = vec![F128::zero(); pow3 * pow2];
         let tables_ext : Vec<Vec<F128>> = (0..5).map(|_| vec![F128::zero(); pow3_adj * pow2]).collect();
-        let eq_sequence = (0..num_vars).map(|i| vec![F128::zero(); 1 << i]).collect();
+        let tail_eq_low = vec![F128::zero(); 1 << ((num_vars + 1) / 2)];
+        let tail_eq_high = vec![F128::zero(); (1 << ((num_vars + 1) / 2)).max(1 << (num_vars - c - 1))];
         let poly_coords = vec![F128::zero(); 5 * 128 * (1 << (num_vars - c - 1))];
         let restrict_eq = vec![F128::zero(); 1 << (c + 1)];
         let restrict_eq_sums = vec![F128::zero(); 256 * restrict_eq.len() / 8];
-        let mut prover = prover.folding_challenge(gamma, ext, ext_scratch, tables_ext, eq_sequence, poly_coords, restrict_eq, restrict_eq_sums);
+        let mut prover = prover.folding_challenge(gamma, ext, ext_scratch, tables_ext, tail_eq_low, tail_eq_high, poly_coords, restrict_eq, restrict_eq_sums);
 
         // let ext_l = expected_ext[0].len();
         // let expected_ext = (0..ext_l).map(|i| {
