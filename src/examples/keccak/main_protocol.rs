@@ -53,6 +53,9 @@ pub fn main_protocol() {
     let boolcheck_ext_scratch = vec![F128::zero(); boolcheck_pow3 * boolcheck_pow2];
     let boolcheck_tables_ext : Vec<Vec<F128>> = (0..5).map(|_| vec![F128::zero(); boolcheck_pow3_adj * boolcheck_pow2]).collect();
     let boolcheck_eq_sequence = (0..num_vars).map(|i| vec![F128::zero(); 1 << i]).collect();
+    let boolcheck_poly_coords = vec![F128::zero(); 5 * 128 * (1 << (num_vars - c - 1))];
+    let boolcheck_restrict_eq = vec![F128::zero(); 1 << (c + 1)];
+    let boolcheck_restrict_eq_sums = vec![F128::zero(); 256 * boolcheck_restrict_eq.len() / 8];
     let boolcheck_pt = pt.clone();
     let mut boolcheck_rs = Vec::with_capacity(num_vars);
     let mut coord_evals = vec![F128::zero(); 128 * 5 + 1];
@@ -117,7 +120,7 @@ pub fn main_protocol() {
     println!(">>>> Initialization took: {} ms", (boolcheck_init - boolcheck_start).as_millis());
 
     let gamma = F128::rand(rng);
-    let mut prover = prover.folding_challenge(gamma, boolcheck_ext, boolcheck_ext_scratch, boolcheck_tables_ext, boolcheck_eq_sequence);
+    let mut prover = prover.folding_challenge(gamma, boolcheck_ext, boolcheck_ext_scratch, boolcheck_tables_ext, boolcheck_eq_sequence, boolcheck_poly_coords, boolcheck_restrict_eq, boolcheck_restrict_eq_sums);
 
     let boolcheck_extensions = Instant::now();
 

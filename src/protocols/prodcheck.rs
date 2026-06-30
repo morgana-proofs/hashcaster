@@ -1,11 +1,7 @@
-use std::{sync::atomic::{AtomicU64, Ordering}, time::Instant};
-
-use bytemuck::cast;
-use itertools::Itertools;
 use num_traits::Zero;
 use rayon::iter::{ParallelIterator, IntoParallelIterator};
 
-use crate::{field::F128, ptr_utils::{AsSharedMutPtr, UnsafeIndexRawMut}, traits::{CompressedPoly, SumcheckObject}, utils::log2_exact};
+use crate::{field::F128, ptr_utils::{AsSharedConstPtr, AsSharedMutPtr, UnsafeIndexRaw, UnsafeIndexRawMut}, traits::{CompressedPoly, SumcheckObject}, utils::log2_exact};
 
 
 /// A very simple sumcheck, only does product of 2 polynomials. It is used as main component for lincheck.
@@ -17,11 +13,8 @@ pub struct Prodcheck {
     active_len: usize,
     pub claim: F128,
     pub challenges: Vec<F128>,
-    num_vars: usize,
 
     cached_round_msg: Option<CompressedPoly>,
-    // cached_p_bind: Option<Vec<F128>>,
-    // cached_q_bind: Option<Vec<F128>>,
 
     rev_order: bool, 
 }
@@ -71,9 +64,6 @@ impl Prodcheck {
             q_scratch,
             claim: initial_claim,
             challenges: vec![],
-            num_vars,
-            // cached_p_bind: None,
-            // cached_q_bind: None,
             cached_round_msg: None,
             rev_order: in_reverse_order,
         }
@@ -111,42 +101,106 @@ impl SumcheckObject for Prodcheck {
         self.claim = round_poly[0] + challenge * round_poly[1] + challenge * challenge * round_poly[2];
         self.challenges.push(challenge);
 
-        #[cfg(not(feature = "parallel"))]
-        {
-            for i in 0..l {
-                for j in 0..half {
-                    self.p_scratch[i][j] = self.p_polys[i][2 * j] + (self.p_polys[i][2 * j + 1] + self.p_polys[i][2 * j]) * challenge;
-                    self.q_scratch[i][j] = self.q_polys[i][2 * j] + (self.q_polys[i][2 * j + 1] + self.q_polys[i][2 * j]) * challenge;
-                }
-                std::mem::swap(&mut self.p_polys[i], &mut self.p_scratch[i]);
-                std::mem::swap(&mut self.q_polys[i], &mut self.q_scratch[i]);
-            }
-        }
+        let next_msg = if half > 1 {
+            let next_half = half / 2;
 
-        #[cfg(feature = "parallel")]
-        {
-            for i in 0..l {
-                let p_ptr = self.p_polys[i].as_shared_mut_ptr();
-                let q_ptr = self.q_polys[i].as_shared_mut_ptr();
-                let p_scratch_ptr = self.p_scratch[i].as_shared_mut_ptr();
-                let q_scratch_ptr = self.q_scratch[i].as_shared_mut_ptr();
-                (0..half).into_par_iter().map(|j| {
-                    unsafe {
-                        let p0 = *p_ptr.get_mut(2 * j);
-                        let p1 = *p_ptr.get_mut(2 * j + 1);
-                        let q0 = *q_ptr.get_mut(2 * j);
-                        let q1 = *q_ptr.get_mut(2 * j + 1);
-                        *p_scratch_ptr.get_mut(j) = p0 + (p1 + p0) * challenge;
-                        *q_scratch_ptr.get_mut(j) = q0 + (q1 + q0) * challenge;
+            #[cfg(not(feature = "parallel"))]
+            let mut response = {
+                let mut response = [F128::zero(), F128::zero(), F128::zero()];
+                for j in 0..next_half {
+                    let mut pq_zero = F128::zero();
+                    let mut pq_one = F128::zero();
+                    let mut pq_inf = F128::zero();
+                    for i in 0..l {
+                        let p00 = self.p_polys[i][4 * j];
+                        let p01 = self.p_polys[i][4 * j + 1];
+                        let p10 = self.p_polys[i][4 * j + 2];
+                        let p11 = self.p_polys[i][4 * j + 3];
+                        let q00 = self.q_polys[i][4 * j];
+                        let q01 = self.q_polys[i][4 * j + 1];
+                        let q10 = self.q_polys[i][4 * j + 2];
+                        let q11 = self.q_polys[i][4 * j + 3];
+                        let p0 = p00 + (p01 + p00) * challenge;
+                        let p1 = p10 + (p11 + p10) * challenge;
+                        let q0 = q00 + (q01 + q00) * challenge;
+                        let q1 = q10 + (q11 + q10) * challenge;
+                        self.p_scratch[i][2 * j] = p0;
+                        self.p_scratch[i][2 * j + 1] = p1;
+                        self.q_scratch[i][2 * j] = q0;
+                        self.q_scratch[i][2 * j + 1] = q1;
+                        pq_zero += p0 * q0;
+                        pq_one += p1 * q1;
+                        pq_inf += (p0 + p1) * (q0 + q1);
                     }
-                }).count();
+                    response[0] += pq_zero;
+                    response[1] += pq_one;
+                    response[2] += pq_inf;
+                }
+                response
+            };
+
+            #[cfg(feature = "parallel")]
+            let mut response = {
+                let p_ptrs : Vec<_> = self.p_polys.iter().map(|p| p.as_shared_ptr()).collect();
+                let q_ptrs : Vec<_> = self.q_polys.iter().map(|q| q.as_shared_ptr()).collect();
+                let p_scratch_ptrs : Vec<_> = self.p_scratch.iter_mut().map(|p| p.as_shared_mut_ptr()).collect();
+                let q_scratch_ptrs : Vec<_> = self.q_scratch.iter_mut().map(|q| q.as_shared_mut_ptr()).collect();
+
+                (0..next_half).into_par_iter().map(|j| {
+                    let mut pq_zero = F128::zero();
+                    let mut pq_one = F128::zero();
+                    let mut pq_inf = F128::zero();
+                    unsafe {
+                        for i in 0..l {
+                            let p_ptr = p_ptrs[i];
+                            let q_ptr = q_ptrs[i];
+                            let p_scratch_ptr = p_scratch_ptrs[i];
+                            let q_scratch_ptr = q_scratch_ptrs[i];
+                            let p00 = *p_ptr.get(4 * j);
+                            let p01 = *p_ptr.get(4 * j + 1);
+                            let p10 = *p_ptr.get(4 * j + 2);
+                            let p11 = *p_ptr.get(4 * j + 3);
+                            let q00 = *q_ptr.get(4 * j);
+                            let q01 = *q_ptr.get(4 * j + 1);
+                            let q10 = *q_ptr.get(4 * j + 2);
+                            let q11 = *q_ptr.get(4 * j + 3);
+                            let p0 = p00 + (p01 + p00) * challenge;
+                            let p1 = p10 + (p11 + p10) * challenge;
+                            let q0 = q00 + (q01 + q00) * challenge;
+                            let q1 = q10 + (q11 + q10) * challenge;
+                            *p_scratch_ptr.get_mut(2 * j) = p0;
+                            *p_scratch_ptr.get_mut(2 * j + 1) = p1;
+                            *q_scratch_ptr.get_mut(2 * j) = q0;
+                            *q_scratch_ptr.get_mut(2 * j + 1) = q1;
+                            pq_zero += p0 * q0;
+                            pq_one += p1 * q1;
+                            pq_inf += (p0 + p1) * (q0 + q1);
+                        }
+                    }
+                    [pq_zero, pq_one, pq_inf]
+                }).reduce(|| [F128::zero(), F128::zero(), F128::zero()], |[a, b, c], [d, e, f]| [a+d, b+e, c+f])
+            };
+
+            for i in 0..l {
                 std::mem::swap(&mut self.p_polys[i], &mut self.p_scratch[i]);
                 std::mem::swap(&mut self.q_polys[i], &mut self.q_scratch[i]);
             }
-        }
+            response[1] += response[0];
+            response[1] += response[2];
+            let (compressed_response, _) = CompressedPoly::compress(&response);
+            Some(compressed_response)
+        } else {
+            for i in 0..l {
+                self.p_scratch[i][0] = self.p_polys[i][0] + (self.p_polys[i][1] + self.p_polys[i][0]) * challenge;
+                self.q_scratch[i][0] = self.q_polys[i][0] + (self.q_polys[i][1] + self.q_polys[i][0]) * challenge;
+                std::mem::swap(&mut self.p_polys[i], &mut self.p_scratch[i]);
+                std::mem::swap(&mut self.q_polys[i], &mut self.q_scratch[i]);
+            }
+            None
+        };
 
         self.active_len = half;
-        self.cached_round_msg = None;
+        self.cached_round_msg = next_msg;
     }
 
     fn round_msg(&mut self) -> CompressedPoly {
@@ -201,10 +255,6 @@ impl SumcheckObject for Prodcheck {
         #[cfg(feature = "parallel")]
         let mut response = iter.reduce(|| [F128::zero(), F128::zero(), F128::zero()], |[a, b, c], [d, e, f]| [a+d, b+e, c+f]);
 
-        // let acc : [u64; 6] = acc.iter().map(|x| x.load(Ordering::Relaxed)).collect_vec().try_into().unwrap();
-        // let mut response = cast::<[u64; 6], [F128; 3]>(acc);
-
-        // cast to coefficient form
         response[1] += response[0];
         response[1] += response[2];
 

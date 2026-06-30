@@ -265,18 +265,19 @@ pub fn extend_n_tables<
                     for z in 0..N {
                         let table_z = *table_ptrs.get(z);
                         let table_ext_z = *table_ext_ptrs.get_mut(z); 
-                         *table_ext_z.get_mut(global_ext_offset + j) =
-                             *table_z.get(global_tab_offset + (offset >> 1));
-                         args[z] = (*table_ext_z.get(global_ext_offset + j));
+                        let value = *table_z.get(global_tab_offset + (offset >> 1));
+                        *table_ext_z.get_mut(global_ext_offset + j) = value;
+                        args[z] = value;
                     }
                     *ret_ptr.get_mut(global_ret_offset + j) = f_quad(args) + f_lin(args);
                 } else {
                     for z in 0..N {
                         let table_ext_z = *(table_ext_ptrs.get(z));
-                         *table_ext_z.get_mut(global_ext_offset + j) =
-                             (*table_ext_z.get(global_ext_offset + j - offset)) +
-                             (*table_ext_z.get(global_ext_offset + j - 2 * offset));
-                        args[z] = (*table_ext_z.get(global_ext_offset + j));
+                        let value =
+                            (*table_ext_z.get(global_ext_offset + j - offset)) +
+                            (*table_ext_z.get(global_ext_offset + j - 2 * offset));
+                        *table_ext_z.get_mut(global_ext_offset + j) = value;
+                        args[z] = value;
                     }
                     *ret_ptr.get_mut(global_ret_offset + j) = f_quad(args);
                 }
@@ -310,9 +311,8 @@ pub fn drop_top_bit(x: usize) -> (usize, usize) {
 }
 
 //#[unroll::unroll_for_loops]
-/// A new version of restrict, to work with boolcheck's contigious array API
-/// It returns restrictions of all coordinates of all polynomials, and writes them in a single contigious array.
-pub fn restrict(polys: &[&[F128]], coords: &[F128], dims: usize) -> Vec<F128> {
+/// Restricts all coordinates of all polynomials and writes them in one contiguous array.
+pub fn restrict(polys: &[&[F128]], coords: &[F128], dims: usize, eq: &mut [F128], eq_sums: &mut [F128], ret: &mut [F128]) {
     let n = polys.len();
     for poly in polys.iter() {
         assert!(poly.len() == 1 << dims);
@@ -321,27 +321,24 @@ pub fn restrict(polys: &[&[F128]], coords: &[F128], dims: usize) -> Vec<F128> {
 
     let chunk_size = (1 << coords.len());
     let num_chunks = 1 << (dims - coords.len());
+    assert!(ret.len() == num_chunks * 128 * n);
+    assert!(eq.len() == 1 << coords.len());
+    assert!(eq_sums.len() == 256 * eq.len() / 8);
 
-    let mut eq = vec![F128::zero(); 1 << coords.len()];
-    eq_poly(coords, &mut eq);
+    eq_poly(coords, eq);
 
     assert!(eq.len() % 16 == 0, "Technical condition for now.");
 
-    let mut eq_sums = Vec::with_capacity(256 * eq.len() / 8);
-
     for i in 0..eq.len()/8 {
-        eq_sums.push(F128::zero());
+        eq_sums[i * 256] = F128::zero();
         for j in 1..256 {
             let (sum_idx, eq_idx) = drop_top_bit(j);
             let tmp = eq[i * 8 + eq_idx] + eq_sums[i * 256 + sum_idx];
-            eq_sums.push(tmp);
+            eq_sums[i * 256 + j] = tmp;
         }
     }
 
-    let mut ret = vec![F128::zero(); num_chunks * 128 * n];
     let ret_ptr = ret.as_shared_mut_ptr();
-
-    let n128 = n * 128;
 
     for q in 0..n {
         #[cfg(not(feature = "parallel"))]
@@ -349,6 +346,7 @@ pub fn restrict(polys: &[&[F128]], coords: &[F128], dims: usize) -> Vec<F128> {
         #[cfg(feature = "parallel")]
         let iter = (0..num_chunks).into_par_iter(); 
         iter.map(|i| {
+            let mut acc = [F128::zero(); 128];
             for j in 0 .. eq.len() / 16 { // Step by 16 
                 let v0 = &eq_sums[j * 512 .. j * 512 + 256];
                 let v1 = &eq_sums[j * 512 + 256 .. j * 512 + 512];
@@ -367,20 +365,21 @@ pub fn restrict(polys: &[&[F128]], coords: &[F128], dims: usize) -> Vec<F128> {
     
                     for u in 0..8 {
                         let bits = v_movemask_epi8(t) as u16;
-
-                        unsafe{
-                            * ret_ptr.get_mut((s*8 + 7 - u + q * 128) * num_chunks + i) += v0[(bits & 255) as usize];
-                            * ret_ptr.get_mut((s*8 + 7 - u + q * 128) * num_chunks + i) += v1[((bits >> 8) & 255) as usize];
-                        }
+                        acc[s*8 + 7 - u] += v0[(bits & 255) as usize];
+                        acc[s*8 + 7 - u] += v1[((bits >> 8) & 255) as usize];
                         t = v_slli_epi64::<1>(t);
                     }
                 }
 
             }
+            unsafe {
+                for coord in 0..128 {
+                    *ret_ptr.get_mut((coord + q * 128) * num_chunks + i) = acc[coord];
+                }
+            }
         }
         ).count();
     }
-    ret
 }
 
 /// This implements efficient matrices using method of 4 Russians, 128x128.

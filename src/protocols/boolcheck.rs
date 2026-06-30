@@ -105,7 +105,7 @@ impl<
     }
 
     /// Folding round. This is an initial message of the verifier.
-    pub fn folding_challenge(self, gamma: F128, ext: Vec<F128>, ext_scratch: Vec<F128>, mut tables_ext: Vec<Vec<F128>>, eq_sequence: Vec<Vec<F128>>)
+    pub fn folding_challenge(self, gamma: F128, ext: Vec<F128>, ext_scratch: Vec<F128>, mut tables_ext: Vec<Vec<F128>>, eq_sequence: Vec<Vec<F128>>, poly_coords: Vec<F128>, restrict_eq: Vec<F128>, restrict_eq_sums: Vec<F128>)
      -> BoolCheckSingle<
         'a,
         N,
@@ -134,6 +134,9 @@ impl<
             ext_scratch,
             &mut tables_ext,
             eq_sequence,
+            poly_coords,
+            restrict_eq,
+            restrict_eq_sums,
         )
 
     }
@@ -153,6 +156,8 @@ pub struct BoolCheckSingle<
     ext_scratch: Option<Vec<F128>>,
     ext_len: usize,
     poly_coords: Option<Vec<F128>>,
+    restrict_eq: Vec<F128>,
+    restrict_eq_sums: Vec<F128>,
     c: usize, // PHASE SWITCH, round < c => PHASE 1.
     pub claim: F128,
     challenges: Vec<F128>,
@@ -174,12 +179,15 @@ impl<
     const N: usize,
     F: FnPackageFolded<N>,
 > BoolCheckSingle<'a, N, F> {
-    pub fn new(f: F, pt: Vec<F128>, polys: &'a [Vec<F128>; N], c: usize, evaluation_claim: F128, mut ext: Vec<F128>, ext_scratch: Vec<F128>, tables_ext: &mut [Vec<F128>], mut eq_sequence: Vec<Vec<F128>>) -> Self {
+    pub fn new(f: F, pt: Vec<F128>, polys: &'a [Vec<F128>; N], c: usize, evaluation_claim: F128, mut ext: Vec<F128>, ext_scratch: Vec<F128>, tables_ext: &mut [Vec<F128>], mut eq_sequence: Vec<Vec<F128>>, poly_coords: Vec<F128>, restrict_eq: Vec<F128>, restrict_eq_sums: Vec<F128>) -> Self {
         for poly in polys.iter() {
             assert!(poly.len() == 1 << pt.len());
         }
         assert!(c < pt.len());
         assert!(ext_scratch.len() == ext.len());
+        assert!(poly_coords.len() == N * 128 * (1 << (pt.len() - c - 1)));
+        assert!(restrict_eq.len() == 1 << (c + 1));
+        assert!(restrict_eq_sums.len() == 256 * restrict_eq.len() / 8);
 
         let (bit_mapping, trit_mapping) = compute_trit_mappings(c);
 
@@ -207,7 +215,9 @@ impl<
             ext : Some(ext),
             ext_scratch: Some(ext_scratch),
             ext_len,
-            poly_coords : None,
+            poly_coords : Some(poly_coords),
+            restrict_eq,
+            restrict_eq_sums,
             c,
             claim: evaluation_claim,
             challenges : vec![],
@@ -321,11 +331,14 @@ impl<
         if self.curr_round() == c + 1 { // Note that we are in the next round now.
             let _ = self.ext.take(); // it is useless now
             let _ = self.ext_scratch.take();
-            self.poly_coords = Some(restrict(
+            restrict(
                 &(self.polys.iter().map(|x|x.as_slice()).collect::<Vec<_>>()),
                 &self.challenges,
-                num_vars
-            ));
+                num_vars,
+                &mut self.restrict_eq,
+                &mut self.restrict_eq_sums,
+                self.poly_coords.as_mut().unwrap(),
+            );
         }
 
     }
@@ -596,7 +609,10 @@ mod tests {
         let ext_scratch = vec![F128::zero(); pow3 * pow2];
         let tables_ext : Vec<Vec<F128>> = (0..2).map(|_| vec![F128::zero(); pow3_adj * pow2]).collect();
         let eq_sequence = (0..num_vars).map(|i| vec![F128::zero(); 1 << i]).collect();
-        let mut instance = instance.folding_challenge(gamma, ext, ext_scratch, tables_ext, eq_sequence);
+        let poly_coords = vec![F128::zero(); 2 * 128 * (1 << (num_vars - phase_switch - 1))];
+        let restrict_eq = vec![F128::zero(); 1 << (phase_switch + 1)];
+        let restrict_eq_sums = vec![F128::zero(); 256 * restrict_eq.len() / 8];
+        let mut instance = instance.folding_challenge(gamma, ext, ext_scratch, tables_ext, eq_sequence, poly_coords, restrict_eq, restrict_eq_sums);
 
         let mut current_claim = evaluation_claim;
 
@@ -680,7 +696,10 @@ mod tests {
         let ext_scratch = vec![F128::zero(); pow3 * pow2];
         let tables_ext : Vec<Vec<F128>> = (0..2).map(|_| vec![F128::zero(); pow3_adj * pow2]).collect();
         let eq_sequence = (0..num_vars).map(|i| vec![F128::zero(); 1 << i]).collect();
-        let mut instance = instance.folding_challenge(gamma, ext, ext_scratch, tables_ext, eq_sequence);
+        let poly_coords = vec![F128::zero(); 2 * 128 * (1 << (num_vars - phase_switch - 1))];
+        let restrict_eq = vec![F128::zero(); 1 << (phase_switch + 1)];
+        let restrict_eq_sums = vec![F128::zero(); 256 * restrict_eq.len() / 8];
+        let mut instance = instance.folding_challenge(gamma, ext, ext_scratch, tables_ext, eq_sequence, poly_coords, restrict_eq, restrict_eq_sums);
 
         let mut current_claim = evaluation_claim;
 
