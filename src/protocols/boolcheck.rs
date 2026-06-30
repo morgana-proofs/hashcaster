@@ -196,7 +196,7 @@ impl<
     const N: usize,
     F: FnPackageFolded<N>,
 > BoolCheckSingle<'a, N, F> {
-    pub fn new(f: F, pt: Vec<F128>, polys: &'a [Vec<F128>; N], c: usize, evaluation_claim: F128, mut ext: Vec<F128>, ext_scratch: Vec<F128>, tables_ext: &mut [Vec<F128>], tail_eq_low: Vec<F128>, tail_eq_high: Vec<F128>, poly_coords: Vec<F128>, restrict_eq: Vec<F128>, restrict_eq_sums: Vec<F128>) -> Self {
+    pub fn new(f: F, pt: Vec<F128>, polys: &'a [Vec<F128>; N], c: usize, evaluation_claim: F128, mut ext: Vec<F128>, ext_scratch: Vec<F128>, tables_ext: &mut [Vec<F128>], tail_eq_low: Vec<F128>, mut tail_eq_high: Vec<F128>, poly_coords: Vec<F128>, restrict_eq: Vec<F128>, restrict_eq_sums: Vec<F128>) -> Self {
         for poly in polys.iter() {
             assert!(poly.len() == 1 << pt.len());
         }
@@ -225,6 +225,7 @@ impl<
         };
 
         let ext_len = 3usize.pow((c + 1) as u32) * (1 << (pt.len() - c - 1));
+        fill_eq_table(&pt[(c + 1)..], &mut tail_eq_high);
     
         Self {
             f,
@@ -246,12 +247,16 @@ impl<
         }
     }
 
-    fn prepare_tail_eq(&mut self, round: usize, low_bits: usize) -> (usize, usize, usize) {
+    fn prepare_phase_1_tail_eq(&mut self, round: usize) -> (usize, usize) {
+        let low_bits = self.c - round;
+        fill_eq_table(&self.pt[(round + 1)..(self.c + 1)], &mut self.tail_eq_low);
+        (1 << low_bits, 1 << (self.pt.len() - self.c - 1))
+    }
+
+    fn prepare_current_tail_eq(&mut self, round: usize) -> usize {
         let tail = &self.pt[(round + 1)..];
-        let high_bits = tail.len() - low_bits;
-        fill_eq_table(&tail[..low_bits], &mut self.tail_eq_low);
-        fill_eq_table(&tail[low_bits..], &mut self.tail_eq_high);
-        (low_bits, 1 << low_bits, 1 << high_bits)
+        fill_eq_table(tail, &mut self.tail_eq_high);
+        1 << tail.len()
     }
 
     pub fn curr_round(&self) -> usize {
@@ -382,36 +387,26 @@ impl<
         }
         
         let curr_phase_1 = round <= c;
-        let tail_len = num_vars - round - 1;
-        let tail_low_bits_for_round = if curr_phase_1 { c - round } else { tail_len.min(5) };
-        let (tail_low_bits, tail_low_len, tail_high_len) = self.prepare_tail_eq(round, tail_low_bits_for_round);
-        let tail_eq_low = &self.tail_eq_low[..tail_low_len];
-        let tail_eq_high = &self.tail_eq_high[..tail_high_len];
 
-        let pt = &self.pt;
-
-        let pt_l = &pt[..round];
-//        let pt_g = &pt[(round + 1)..];
-        let pt_r = pt[round];
+        let pt_r = self.pt[round];
 
 
         if curr_phase_1 {
             // PHASE 1:
+            let (tail_low_len, tail_high_len) = self.prepare_phase_1_tail_eq(round);
+            let tail_eq_low = &self.tail_eq_low[..tail_low_len];
+            let tail_eq_high = &self.tail_eq_high[..tail_high_len];
             let ext = self.ext.as_ref().unwrap();
 
             let phase1_dims = c - round;
             let pow3 = 3usize.pow(phase1_dims as u32);
-            let phase1_mask = (1 << phase1_dims) - 1;
 
             #[cfg(not(feature = "parallel"))]
             let mut poly_deg_2 =
             (0 .. tail_high_len).into_iter().map(|hi| {
                 let mut pd2_part = [F128::zero(), F128::zero(), F128::zero()];
                 for lo in 0..tail_low_len {
-                    let index = (hi << tail_low_bits) + lo;
-                    let i = index >> phase1_dims;
-                    let j = index & phase1_mask;
-                    let offset = 3 * (i * pow3 + self.bits_to_trits_map[j] as usize);
+                    let offset = 3 * (hi * pow3 + self.bits_to_trits_map[lo] as usize);
                     let multiplier = tail_eq_low[lo];
                     pd2_part[0] += ext[offset] * multiplier;
                     pd2_part[1] += ext[offset + 1] * multiplier;
@@ -427,10 +422,7 @@ impl<
             (0 .. tail_high_len).into_par_iter().map(|hi| {
                 let mut pd2_part = [F128::zero(), F128::zero(), F128::zero()];
                 for lo in 0..tail_low_len {
-                    let index = (hi << tail_low_bits) + lo;
-                    let i = index >> phase1_dims;
-                    let j = index & phase1_mask;
-                    let offset = 3 * (i * pow3 + self.bits_to_trits_map[j] as usize);
+                    let offset = 3 * (hi * pow3 + self.bits_to_trits_map[lo] as usize);
                     let multiplier = tail_eq_low[lo];
                     pd2_part[0] += ext[offset] * multiplier;
                     pd2_part[1] += ext[offset + 1] * multiplier;
@@ -449,7 +441,7 @@ impl<
             let tmp = poly_deg_2[2];
             poly_deg_2[1] += tmp;
 
-            let eq_y_multiplier = eq_ev(&self.challenges, &pt_l);
+            let eq_y_multiplier = eq_ev(&self.challenges, &self.pt[..round]);
 
             poly_deg_2.iter_mut().map(|c| *c *= eq_y_multiplier).count();
 
@@ -471,30 +463,22 @@ impl<
             ret
         } else {
 
-            let half = tail_low_len * tail_high_len;
+            let half = self.prepare_current_tail_eq(round);
             assert!(half == 1 << (num_vars - round - 1));
+            let eq_evs = &self.tail_eq_high[..half];
 
             let poly_coords = self.poly_coords.as_ref().unwrap();
 
             let f_alg = |data, start, offset| {self.f.exec_alg(data, start, offset)};
 
             #[cfg(not(feature = "parallel"))]
-            let iter = (0..tail_high_len).into_iter();
+            let iter = (0..half).into_iter();
 
             #[cfg(feature = "parallel")]
-            let iter = (0..tail_high_len).into_par_iter();
+            let iter = (0..half).into_par_iter();
 
-            let iter = iter.map(|hi| {
-                let mut pd2_part = [F128::zero(), F128::zero(), F128::zero()];
-                for lo in 0..tail_low_len {
-                    let i = (hi << tail_low_bits) + lo;
-                    let multiplier = tail_eq_low[lo];
-                    let part = f_alg(poly_coords, i, 1 << (num_vars - c - 1));
-                    pd2_part[0] += part[0] * multiplier;
-                    pd2_part[1] += part[1] * multiplier;
-                    pd2_part[2] += part[2] * multiplier;
-                }
-                pd2_part.map(|x| x * tail_eq_high[hi])
+            let iter = iter.map(|i| {
+                f_alg(poly_coords, i, 1 << (num_vars - c - 1)).map(|x| x * eq_evs[i])
             });
 
             #[cfg(not(feature = "parallel"))]
@@ -502,7 +486,7 @@ impl<
             #[cfg(feature = "parallel")]
             let mut poly_deg_2 = iter.reduce(||[F128::zero(), F128::zero(), F128::zero()], |[a,b,c], [d,e,f]| [a+d,b+e,c+f]);
 
-            let eq_y_multiplier = eq_ev(&self.challenges, &pt_l);
+            let eq_y_multiplier = eq_ev(&self.challenges, &self.pt[..round]);
             poly_deg_2.iter_mut().map(|c| *c *= eq_y_multiplier).count();
 
             // Cast poly to coefficient form
