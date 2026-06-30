@@ -1,7 +1,7 @@
 use num_traits::{One, Zero};
 use rayon::{iter::{IntoParallelIterator, ParallelIterator}, slice::{ParallelSlice, ParallelSliceMut}};
 
-use crate::{field::F128, protocols::utils::{compute_trit_mappings, eq_ev, eq_poly_sequence, extend_n_tables, restrict, restrict_legacy, twist_evals}, ptr_utils::ConstPtr, traits::{CompressedPoly, SumcheckObject}};
+use crate::{field::F128, protocols::utils::{compute_trit_mappings, eq_ev, eq_poly_sequence, extend_n_tables, restrict, twist_evals}, ptr_utils::{AsSharedMutPtr, ConstPtr, UnsafeIndexRawMut}, traits::{CompressedPoly, SumcheckObject}};
 
 use super::utils::evaluate_univar;
 
@@ -103,7 +103,7 @@ impl<
     }
 
     /// Folding round. This is an initial message of the verifier.
-    pub fn folding_challenge(self, gamma: F128)
+    pub fn folding_challenge(self, gamma: F128, ext: Vec<F128>, mut tables_ext: Vec<Vec<F128>>, eq_sequence: Vec<Vec<F128>>)
      -> BoolCheckSingle<
         N,
         impl FnPackageFolded<N>,
@@ -127,6 +127,9 @@ impl<
             polys,
             c,
             evaluation_claim,
+            ext,
+            &mut tables_ext,
+            eq_sequence,
         )
 
     }
@@ -163,7 +166,7 @@ impl<
     const N: usize,
     F: FnPackageFolded<N>,
 > BoolCheckSingle<N, F> {
-    pub fn new(f: F, pt: Vec<F128>, polys: [Vec<F128>; N], c: usize, evaluation_claim: F128) -> Self {
+    pub fn new(f: F, pt: Vec<F128>, polys: [Vec<F128>; N], c: usize, evaluation_claim: F128, mut ext: Vec<F128>, tables_ext: &mut [Vec<F128>], mut eq_sequence: Vec<Vec<F128>>) -> Self {
         for poly in polys.iter() {
             assert!(poly.len() == 1 << pt.len());
         }
@@ -178,11 +181,14 @@ impl<
                 &polys,
                 c, &trit_mapping, 
                 |args| f.exec_lin_compressed(args), 
-                |args| f.exec_quad_compressed(args)
-            )
+                |args| f.exec_quad_compressed(args),
+                &mut ext,
+                tables_ext,
+            );
+            ext
         };
 
-        let eq_sequence = eq_poly_sequence(&pt[1..]);
+        eq_poly_sequence(&pt[1..], &mut eq_sequence);
     
         Self {
             f,
@@ -251,18 +257,31 @@ impl<
 
         if curr_phase_1 {
             let ext = self.ext.as_mut().unwrap();
+            let new_len = ext.len() / 3;
 
             #[cfg(not(feature = "parallel"))]
-            let ext_chunks = ext.chunks(3);
+            {
+                for j in 0..new_len {
+                    let v0 = ext[3 * j];
+                    let v1 = ext[3 * j + 1];
+                    let v2 = ext[3 * j + 2];
+                    ext[j] = v0 + (v0 + v1 + v2) * t + v2 * t2;
+                }
+            }
 
             #[cfg(feature = "parallel")]
-            let ext_chunks = ext.par_chunks(3);
-
-            self.ext = Some(
-                ext_chunks.map(|chunk| {
-                    chunk[0] + (chunk[0] + chunk[1] + chunk[2]) * t + chunk[2] * t2
-                }).collect()
-            );
+            {
+                let ext_ptr = ext.as_shared_mut_ptr();
+                (0..new_len).into_par_iter().map(|j| {
+                    unsafe {
+                        let v0 = *ext_ptr.get_mut(3 * j);
+                        let v1 = *ext_ptr.get_mut(3 * j + 1);
+                        let v2 = *ext_ptr.get_mut(3 * j + 2);
+                        *ext_ptr.get_mut(j) = v0 + (v0 + v1 + v2) * t + v2 * t2;
+                    }
+                }).count();
+            }
+            ext.truncate(new_len);
         } else {
             //            let poly_coords = self.poly_coords.last().unwrap();
             let half = 1 << (num_vars - round - 1);
@@ -532,7 +551,9 @@ mod tests {
 
         let p_zip_q : Vec<_> = p.iter().zip(q.iter()).map(|(x, y)| *x & *y).collect();
         //let evaluation_claim = evaluate(&p_zip_q, &pt);
-        let evaluation_claim = p_zip_q.iter().zip(eq_poly(&pt).iter()).fold(F128::zero(), |acc, (x, y)|acc + *x * *y);
+        let mut eq = vec![F128::zero(); 1 << pt.len()];
+        eq_poly(&pt, &mut eq);
+        let evaluation_claim = p_zip_q.iter().zip(eq.iter()).fold(F128::zero(), |acc, (x, y)|acc + *x * *y);
 
         let phase_switch = 5;
 
@@ -550,7 +571,13 @@ mod tests {
 
         let gamma = F128::rand(rng);
 
-        let mut instance = instance.folding_challenge(gamma);
+        let pow3 = 3usize.pow((phase_switch + 1) as u32);
+        let pow2 = 1 << (num_vars - phase_switch - 1);
+        let pow3_adj = pow3 / 3 * 2;
+        let ext = vec![F128::zero(); pow3 * pow2];
+        let tables_ext : Vec<Vec<F128>> = (0..2).map(|_| vec![F128::zero(); pow3_adj * pow2]).collect();
+        let eq_sequence = (0..num_vars).map(|i| vec![F128::zero(); 1 << i]).collect();
+        let mut instance = instance.folding_challenge(gamma, ext, tables_ext, eq_sequence);
 
         let mut current_claim = evaluation_claim;
 
@@ -605,7 +632,9 @@ mod tests {
 
         let p_zip_q : Vec<_> = p.iter().zip(q.iter()).map(|(x, y)| *x & *y).collect();
         //let evaluation_claim = evaluate(&p_zip_q, &pt);
-        let evaluation_claim = p_zip_q.iter().zip(eq_poly(&pt).iter()).fold(F128::zero(), |acc, (x, y)|acc + *x * *y);
+        let mut eq = vec![F128::zero(); 1 << pt.len()];
+        eq_poly(&pt, &mut eq);
+        let evaluation_claim = p_zip_q.iter().zip(eq.iter()).fold(F128::zero(), |acc, (x, y)|acc + *x * *y);
 
         let phase_switch = 5;
 
@@ -626,7 +655,13 @@ mod tests {
 
         let gamma = F128::rand(rng);
 
-        let mut instance = instance.folding_challenge(gamma);
+        let pow3 = 3usize.pow((phase_switch + 1) as u32);
+        let pow2 = 1 << (num_vars - phase_switch - 1);
+        let pow3_adj = pow3 / 3 * 2;
+        let ext = vec![F128::zero(); pow3 * pow2];
+        let tables_ext : Vec<Vec<F128>> = (0..2).map(|_| vec![F128::zero(); pow3_adj * pow2]).collect();
+        let eq_sequence = (0..num_vars).map(|i| vec![F128::zero(); 1 << i]).collect();
+        let mut instance = instance.folding_challenge(gamma, ext, tables_ext, eq_sequence);
 
         let mut current_claim = evaluation_claim;
 
@@ -678,7 +713,9 @@ mod tests {
         let polys = [p, q];
 
         let instance = MulticlaimCheck::new(&polys, pt, frob_evals.clone());
-        let mut instance = instance.folding_challenge(gamma);
+        let multi_poly = vec![F128::zero(); 1 << num_vars];
+        let multi_eq = vec![F128::zero(); 1 << num_vars];
+        let mut instance = instance.folding_challenge(gamma, multi_poly, multi_eq);
         
 
         let mut claim = evaluate_univar(&frob_evals, gamma); //.iter().zip(gamma_pows.iter()).map(|(x, y)| *x * y).fold(F128::zero(), |x, y| x + y);
@@ -709,8 +746,9 @@ mod tests {
 
         let label2 = Instant::now();
 
-        assert!(evaluate(&polys[0], &rs) == evals[0]);
-        assert!(evaluate(&polys[1], &rs) == evals[1]);
+        let mut eq = vec![F128::zero(); 1 << rs.len()];
+        assert!(evaluate(&polys[0], &rs, &mut eq) == evals[0]);
+        assert!(evaluate(&polys[1], &rs, &mut eq) == evals[1]);
 
         println!("Reduction took: {} ms", (label2-label1).as_millis());
 

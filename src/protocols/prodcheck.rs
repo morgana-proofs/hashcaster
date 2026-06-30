@@ -5,7 +5,7 @@ use itertools::Itertools;
 use num_traits::Zero;
 use rayon::iter::{ParallelIterator, IntoParallelIterator};
 
-use crate::{field::F128, traits::{CompressedPoly, SumcheckObject}, utils::log2_exact};
+use crate::{field::F128, ptr_utils::{AsSharedMutPtr, UnsafeIndexRawMut}, traits::{CompressedPoly, SumcheckObject}, utils::log2_exact};
 
 
 /// A very simple sumcheck, only does product of 2 polynomials. It is used as main component for lincheck.
@@ -102,29 +102,30 @@ impl SumcheckObject for Prodcheck {
                 for j in 0..half {
                     self.p_polys[i][j] = self.p_polys[i][2 * j] + (self.p_polys[i][2 * j + 1] + self.p_polys[i][2 * j]) * challenge;
                     self.q_polys[i][j] = self.q_polys[i][2 * j] + (self.q_polys[i][2 * j + 1] + self.q_polys[i][2 * j]) * challenge;
-                    self.p_polys[i].truncate(half);
-                    self.q_polys[i].truncate(half);
                 }
+                self.p_polys[i].truncate(half);
+                self.q_polys[i].truncate(half);
             }
         }
 
         #[cfg(feature = "parallel")]
         {
-            let mut p_new = vec![];
-            let mut q_new = vec![];
-
             for i in 0..l {
-                p_new.push((0..half).into_par_iter().map(|j| {
-                    self.p_polys[i][2 * j] + (self.p_polys[i][2 * j + 1] + self.p_polys[i][2 * j]) * challenge
-                }).collect());
-                q_new.push((0..half).into_par_iter().map(|j| {
-                    self.q_polys[i][2 * j] + (self.q_polys[i][2 * j + 1] + self.q_polys[i][2 * j]) * challenge
-                }).collect());
+                let p_ptr = self.p_polys[i].as_shared_mut_ptr();
+                let q_ptr = self.q_polys[i].as_shared_mut_ptr();
+                (0..half).into_par_iter().map(|j| {
+                    unsafe {
+                        let p0 = *p_ptr.get_mut(2 * j);
+                        let p1 = *p_ptr.get_mut(2 * j + 1);
+                        let q0 = *q_ptr.get_mut(2 * j);
+                        let q1 = *q_ptr.get_mut(2 * j + 1);
+                        *p_ptr.get_mut(j) = p0 + (p1 + p0) * challenge;
+                        *q_ptr.get_mut(j) = q0 + (q1 + q0) * challenge;
+                    }
+                }).count();
+                self.p_polys[i].truncate(half);
+                self.q_polys[i].truncate(half);
             }
-            
-            self.p_polys = p_new;
-            self.q_polys = q_new;
-            
         }
 
         self.cached_round_msg = None;
@@ -230,8 +231,9 @@ mod tests {
 
         assert!(prover.p_polys[0].len() == 1);
 
-        let ev_p : Vec<_> = p_polys.iter().map(|p| evaluate(&p, &prover.challenges)).collect();
-        let ev_q : Vec<_> = q_polys.iter().map(|q| evaluate(&q, &prover.challenges)).collect();
+        let mut eq = vec![F128::zero(); 1 << prover.challenges.len()];
+        let ev_p : Vec<_> = p_polys.iter().map(|p| evaluate(&p, &prover.challenges, &mut eq)).collect();
+        let ev_q : Vec<_> = q_polys.iter().map(|q| evaluate(&q, &prover.challenges, &mut eq)).collect();
 
         assert!(ev_p.iter().zip(ev_q.iter()).map(|(a, b)| *a * b).fold(F128::zero(), |a, b| a + b) == claim);
     }

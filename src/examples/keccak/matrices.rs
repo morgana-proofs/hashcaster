@@ -296,21 +296,22 @@ impl LinOp for KeccakLinMatrix {
     }
 }
 
-/// Rather inefficient implementation
-pub fn keccak_linround_witness(input: [&[F128]; 5]) -> [Vec<F128>; 5] {
+pub fn keccak_linround_witness_into(input: [&[F128]; 5], output: &mut [Vec<F128>; 5], input_state: &mut [Vec<F128>; 3], output_state: &mut [Vec<F128>; 3]) {
     let l = input[0].len();
     for i in 1..5 {
         assert!(input[i].len() == l);
+        assert!(output[i].len() == l);
     }
+    assert!(output[0].len() == l);
     assert!(l % 1024 == 0);
+    for j in 0..3 {
+        assert!(input_state[j].len() == 1600);
+        assert!(output_state[j].len() == 1600);
+    }
     
     let m = KeccakLinMatrixUnbatched::new();
 
     let nbatches = l / 1024;
-
-    let mut input_state = vec![vec![F128::zero(); 1600]; 3];
-
-    let mut output = vec![vec![F128::zero(); l]; 5];
 
     for batch_index in 0 .. nbatches {
         for i in 0..5 {
@@ -319,11 +320,11 @@ pub fn keccak_linround_witness(input: [&[F128]; 5]) -> [Vec<F128>; 5] {
                     &input[i][batch_index * 1024 + j * 320 .. batch_index * 1024 + (j + 1) * 320]
                 );
             }
+            output[i][batch_index * 1024 + (3 * 320) .. (batch_index + 1) * 1024].fill(F128::zero());
         }
 
-        let mut output_state = vec![vec![F128::zero(); 1600]; 3];
-
         for j in 0..3 {
+            output_state[j].fill(F128::zero());
             m.apply(&input_state[j], &mut output_state[j]);
         }
 
@@ -335,8 +336,6 @@ pub fn keccak_linround_witness(input: [&[F128]; 5]) -> [Vec<F128>; 5] {
             }
         }
     }
-
-    output.try_into().unwrap()
 }
 
 #[cfg(test)]
@@ -390,12 +389,16 @@ mod tests {
         };
 
         let polys_refs = polys.iter().map(|x| x.as_slice()).collect::<Vec<_>>().try_into().unwrap();
+        let mut m_p : [Vec<F128>; 5] = (0..5).map(|_| vec![F128::zero(); 1 << num_vars]).collect::<Vec<_>>().try_into().unwrap();
+        let mut input_state : [Vec<F128>; 3] = (0..3).map(|_| vec![F128::zero(); 1600]).collect::<Vec<_>>().try_into().unwrap();
+        let mut output_state : [Vec<F128>; 3] = (0..3).map(|_| vec![F128::zero(); 1600]).collect::<Vec<_>>().try_into().unwrap();
 
         let label0 = Instant::now();
 
-        let m_p = keccak_linround_witness(polys_refs);
+        keccak_linround_witness_into(polys_refs, &mut m_p, &mut input_state, &mut output_state);
 
-        let initial_claims : [_; 5] = (0..5).map(|i| evaluate(&m_p[i], &pt)).collect::<Vec<_>>().try_into().unwrap();
+        let mut eq = vec![F128::zero(); 1 << pt.len()];
+        let initial_claims : [_; 5] = (0..5).map(|i| evaluate(&m_p[i], &pt, &mut eq)).collect::<Vec<_>>().try_into().unwrap();
 
         let label1 = Instant::now();
 
@@ -407,7 +410,14 @@ mod tests {
 
 
         let gamma = F128::rand(rng);
-        let mut prover = prover.folding_challenge(gamma);
+        let chunk = 1 << num_active_vars;
+        let eq_dormant = vec![F128::zero(); 1 << (pt.len() - num_active_vars)];
+        let p_polys = vec![vec![F128::zero(); chunk]; 5];
+        let eq = vec![F128::zero(); chunk];
+        let gamma_eqs = vec![F128::zero(); 5 * chunk];
+        let q = vec![F128::zero(); 5 * chunk];
+        let q_polys = vec![vec![F128::zero(); chunk]; 5];
+        let mut prover = prover.folding_challenge(gamma, eq_dormant, p_polys, eq, gamma_eqs, q, q_polys);
 
         let label3 = Instant::now();
 
@@ -447,7 +457,8 @@ mod tests {
         assert!(rs.len() == num_vars);
 
         for i in 0..5 {
-            assert!(p_evs[i] == evaluate(&polys[i], &rs));
+            let mut eq = vec![F128::zero(); 1 << rs.len()];
+            assert!(p_evs[i] == evaluate(&polys[i], &rs, &mut eq));
         }
 
     }

@@ -12,7 +12,7 @@ use std::iter::once;
 use num_traits::{One, Zero};
 use rayon::iter::{IntoParallelIterator, IntoParallelRefMutIterator, ParallelIterator};
 
-use crate::{field::F128, precompute::frobenius_table::FROBENIUS, protocols::utils::frobenius_inv_lc, traits::{CompressedPoly, SumcheckObject}};
+use crate::{field::F128, precompute::frobenius_table::FROBENIUS, protocols::utils::frobenius_inv_lc, ptr_utils::{AsSharedMutPtr, UnsafeIndexRawMut}, traits::{CompressedPoly, SumcheckObject}};
 
 use super::{prodcheck::Prodcheck, utils::{eq_poly, evaluate, evaluate_univar}};
 
@@ -31,7 +31,7 @@ impl<'a, const N: usize> MulticlaimCheck<'a, N> {
         Self { polys, pt, openings }
     }
 
-    pub fn folding_challenge(self, gamma: F128) -> MulticlaimCheckSingle<'a, N> {
+    pub fn folding_challenge(self, gamma: F128, mut poly: Vec<F128>, eq: Vec<F128>) -> MulticlaimCheckSingle<'a, N> {
         let Self { polys, pt, openings } = self;
     
         let mut gamma_pows = Vec::with_capacity(128 * N);
@@ -42,19 +42,21 @@ impl<'a, const N: usize> MulticlaimCheck<'a, N> {
         }
 
         let l = 1 << pt.len();
+        assert!(poly.len() == l);
 
         #[cfg(not(feature = "parallel"))]
         let iter = (0..l);
         #[cfg(feature = "parallel")]
         let iter = (0..l).into_par_iter();
 
-        let poly : Vec<F128> = iter.map(|i| {
+        let poly_ptr = poly.as_shared_mut_ptr();
+        iter.map(|i| {
             let mut p = polys[0][i]; 
             for j in 1..N {
                 p += polys[j][i] * gamma_pows[128 * j];
             }
-            p
-        }).collect();
+            unsafe{ *poly_ptr.get_mut(i) = p; }
+        }).count();
 
         let openings : Vec<F128> = (0..128).map(|i|{
             let mut o = openings[i];
@@ -64,7 +66,7 @@ impl<'a, const N: usize> MulticlaimCheck<'a, N> {
             o
         }).collect();
 
-        MulticlaimCheckSingle::new(poly, pt, openings, gamma_pows, polys)       
+        MulticlaimCheckSingle::new(poly, pt, openings, gamma_pows, polys, eq)       
 
     }
 }
@@ -76,8 +78,9 @@ pub struct MulticlaimCheckSingle<'a, const N: usize> {
 }
 
 impl<'a, const N: usize> MulticlaimCheckSingle<'a, N> {
-    pub fn new(poly: Vec<F128>, pt: Vec<F128>, openings: Vec<F128>, gamma_pows: Vec<F128>, polys: &'a [Vec<F128>; N]) -> Self {
-        let mut eq = eq_poly(&pt);
+    pub fn new(poly: Vec<F128>, pt: Vec<F128>, openings: Vec<F128>, gamma_pows: Vec<F128>, polys: &'a [Vec<F128>; N], mut eq: Vec<F128>) -> Self {
+        assert!(eq.len() == 1 << pt.len());
+        eq_poly(&pt, &mut eq);
         // We want to compute sum \gamma_i * eq(Frob^{-i}(r), x)
         // This can be done by applying matrix M_{\gamma} = (sum \gamma_i Frob^{-i}) to eq.
         let m = frobenius_inv_lc(&gamma_pows[0..128]);
@@ -100,7 +103,8 @@ impl<'a, const N: usize> MulticlaimCheckSingle<'a, N> {
 
     /// Returns openings.
     pub fn finish(self) -> Vec<F128> {
-        let mut ret : Vec<F128> = once(F128::zero()).chain((1..N).map(|i| evaluate(&self.polys[i], &self.object.challenges))).collect();
+        let mut eq = vec![F128::zero(); 1 << self.object.challenges.len()];
+        let mut ret : Vec<F128> = once(F128::zero()).chain((1..N).map(|i| evaluate(&self.polys[i], &self.object.challenges, &mut eq))).collect();
         let tmp = evaluate_univar(&ret, self.gamma128);
         ret[0] = tmp + self.object.p_polys[0][0];
         ret
@@ -144,7 +148,8 @@ mod tests {
                 pt.iter().map(|x| x.frob(-i)).collect::<Vec<F128>>()
             )
         }
-        let evs = (0..128).map(|i|{evaluate(&poly, &pt_inv_orbit[i])}).collect::<Vec<F128>>();
+        let mut eq = vec![F128::zero(); 1 << pt.len()];
+        let evs = (0..128).map(|i|{evaluate(&poly, &pt_inv_orbit[i], &mut eq)}).collect::<Vec<F128>>();
 
         let polys = [poly];
 
@@ -155,7 +160,9 @@ mod tests {
 
         let label0 = Instant::now();
 
-        let mut prover = prover.folding_challenge(gamma);
+        let multi_poly = vec![F128::zero(); 1 << num_vars];
+        let multi_eq = vec![F128::zero(); 1 << num_vars];
+        let mut prover = prover.folding_challenge(gamma, multi_poly, multi_eq);
         let mut gamma_pows = vec![];
         let mut tmp = F128::one();
         for _ in 0..128 {
@@ -202,7 +209,8 @@ mod tests {
         println!("round_msg(): {} ms", acc_round);
         println!("bind(): {} ms", acc_bind);
 
-        assert!(evaluate(&polys[0], &rs) * eq_evs == claim);
+        let mut eq = vec![F128::zero(); 1 << rs.len()];
+        assert!(evaluate(&polys[0], &rs, &mut eq) * eq_evs == claim);
 
     }
 }

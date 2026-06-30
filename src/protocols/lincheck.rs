@@ -153,14 +153,19 @@ impl<const N: usize, const M: usize, L: LinOp> Lincheck<N, M, L> {
         Self { matrix, polys, pt, num_vars, num_active_vars, initial_claims }
     } 
 
-    pub fn folding_challenge(self, gamma: F128) -> PreparedLincheck {
+    pub fn folding_challenge(self, gamma: F128, mut eq_dormant: Vec<F128>, mut p_polys: Vec<Vec<F128>>, mut eq: Vec<F128>, mut gamma_eqs: Vec<F128>, mut q: Vec<F128>, mut q_polys: Vec<Vec<F128>>) -> PreparedLincheck {
         let chunk_size = 1 << self.num_active_vars;
         let pt_active = &self.pt[ .. self.num_active_vars];
         let pt_dormant = &self.pt[self.num_active_vars .. ];
         // Restrict.
         
-        let eq_dormant = eq_poly(&pt_dormant);
-        let mut p_polys = vec![vec![F128::zero(); 1 << self.num_active_vars]; N];
+        assert!(eq_dormant.len() == 1 << pt_dormant.len());
+        eq_poly(&pt_dormant, &mut eq_dormant);
+        assert!(p_polys.len() == N);
+        for i in 0..N {
+            assert!(p_polys[i].len() == chunk_size);
+            p_polys[i].fill(F128::zero());
+        }
         
 
         self.polys.into_iter().enumerate().map(|(i, poly)| {
@@ -175,25 +180,25 @@ impl<const N: usize, const M: usize, L: LinOp> Lincheck<N, M, L> {
             gamma_pows.push(tmp);
             tmp *= gamma;
         }
-        let eq = eq_poly(&pt_active);
-        let gamma_eqs: Vec<_> = gamma_pows.iter()
-            .map(|gpow| (0..(1 << self.num_active_vars))
-            .map(|i| *gpow * eq[i]))
-            .flatten()
-            .collect();
+        assert!(eq.len() == 1 << pt_active.len());
+        eq_poly(&pt_active, &mut eq);
+        assert!(gamma_eqs.len() == M * chunk_size);
+        for j in 0..M {
+            for i in 0..chunk_size {
+                gamma_eqs[j * chunk_size + i] = gamma_pows[j] * eq[i];
+            }
+        }
 
-        let mut q = vec![F128::zero(); N * (1 << self.num_active_vars)];
+        assert!(q.len() == N * chunk_size);
+        q.fill(F128::zero());
         self.matrix.apply_transposed(&gamma_eqs, &mut q);
         // q(x) = M(pt[0..a], x)
 
-        let mut q_polys = vec![];
-        for _ in 0..N {
-            let tmp = q.split_off(1 << self.num_active_vars);
-            q_polys.push(q);
-            q = tmp;
+        assert!(q_polys.len() == N);
+        for i in 0..N {
+            assert!(q_polys[i].len() == chunk_size);
+            q_polys[i].copy_from_slice(&q[i * chunk_size .. (i + 1) * chunk_size]);
         }
-        //sanity:
-        assert_eq!(q.len(), 0);
 
         let claim = evaluate_univar(&self.initial_claims, gamma);
 
@@ -359,7 +364,8 @@ mod tests {
             .map(|(src, dst)| linop.apply(src, dst)).count();
         // we will have more efficient witness computation later anyway
 
-        let initial_claim = evaluate(&l_p, &pt);
+        let mut eq = vec![F128::zero(); 1 << pt.len()];
+        let initial_claim = evaluate(&l_p, &pt, &mut eq);
 
         let label0 = Instant::now();
 
@@ -369,7 +375,14 @@ mod tests {
 
         let prover = Lincheck::<1, 1, _>::new([p_], pt.clone(), linop.clone(), num_active_vars, [initial_claim]);
 
-        let mut prover = prover.folding_challenge(F128::rand(rng));
+        let chunk = 1 << num_active_vars;
+        let eq_dormant = vec![F128::zero(); 1 << (pt.len() - num_active_vars)];
+        let p_polys = vec![vec![F128::zero(); chunk]; 1];
+        let eq = vec![F128::zero(); chunk];
+        let gamma_eqs = vec![F128::zero(); chunk];
+        let q = vec![F128::zero(); chunk];
+        let q_polys = vec![vec![F128::zero(); chunk]; 1];
+        let mut prover = prover.folding_challenge(F128::rand(rng), eq_dormant, p_polys, eq, gamma_eqs, q, q_polys);
 
         let label1 = Instant::now();
 
@@ -388,8 +401,10 @@ mod tests {
 
         let LincheckOutput {p_evs, q_evs} = prover.finish();
 
-        let eq1 = eq_poly(&pt[..num_active_vars]);
-        let eq0 = eq_poly(&rs);
+        let mut eq1 = vec![F128::zero(); 1 << num_active_vars];
+        let mut eq0 = vec![F128::zero(); 1 << rs.len()];
+        eq_poly(&pt[..num_active_vars], &mut eq1);
+        eq_poly(&rs, &mut eq0);
         let mut adj_eq_vec = vec![];
     
         let mut mult = F128::one();
@@ -420,7 +435,8 @@ mod tests {
         rs.extend(pt[num_active_vars..].iter().map(|x| *x));
         assert!(rs.len() == num_vars);
 
-        assert!(p_evs[0] == evaluate(&poly, &rs));
+        let mut eq = vec![F128::zero(); 1 << rs.len()];
+        assert!(p_evs[0] == evaluate(&poly, &rs, &mut eq));
 
     }
 

@@ -15,7 +15,7 @@ use std::time::Instant;
 use itertools::Itertools;
 use num_traits::{One, Zero};
 use rand::rngs::OsRng;
-use crate::{examples::keccak::{chi_round::{chi_round_witness, ChiPackage}, matrices::{keccak_linround_witness, KeccakLinMatrix}}, field::F128, protocols::{boolcheck::{BoolCheck, BoolCheckOutput, FnPackage}, lincheck::{LinOp, Lincheck, LincheckOutput}, multiclaim::MulticlaimCheck, utils::{eq_ev, eq_poly, evaluate, evaluate_univar, untwist_evals}}, traits::SumcheckObject};
+use crate::{examples::keccak::{chi_round::{chi_round_witness_into, ChiPackage}, matrices::{keccak_linround_witness_into, KeccakLinMatrix}}, field::F128, protocols::{boolcheck::{BoolCheck, BoolCheckOutput, FnPackage}, lincheck::{LinOp, Lincheck, LincheckOutput}, multiclaim::MulticlaimCheck, utils::{eq_ev, eq_poly, evaluate, evaluate_univar, untwist_evals}}, traits::SumcheckObject};
 
 #[test]
 pub fn main_protocol() {
@@ -35,19 +35,26 @@ pub fn main_protocol() {
 
     println!("... Preparing witness...");
 
-    let wtns_start = Instant::now();
+    let mut eq_scratch = vec![F128::zero(); 1 << pt.len()];
+
+    let mut lin_input_state : [Vec<F128>; 3] = (0..3).map(|_| vec![F128::zero(); 1600]).collect::<Vec<_>>().try_into().unwrap();
+    let mut lin_output_state : [Vec<F128>; 3] = (0..3).map(|_| vec![F128::zero(); 1600]).collect::<Vec<_>>().try_into().unwrap();
 
     let layer0 : [Vec<F128>; 5] = polys.try_into().unwrap();
     let polys_refs = layer0.iter().map(|x| x.as_slice()).collect::<Vec<_>>().try_into().unwrap();
+    let mut layer1 : [Vec<F128>; 5] = (0..5).map(|_| vec![F128::zero(); 1 << num_vars]).collect::<Vec<_>>().try_into().unwrap();
+    let mut layer2 : [Vec<F128>; 5] = (0..5).map(|_| vec![F128::zero(); 1 << num_vars]).collect::<Vec<_>>().try_into().unwrap();
 
-    let layer1 = keccak_linround_witness(polys_refs);
-    let layer2 = chi_round_witness(&layer1);
+    let wtns_start = Instant::now();
+
+    keccak_linround_witness_into(polys_refs, &mut layer1, &mut lin_input_state, &mut lin_output_state);
+    chi_round_witness_into(&layer1, &mut layer2);
 
     let wtns_finish = Instant::now();
 
     println!(">>>> Witness gen took {} ms", (wtns_finish - wtns_start).as_millis());
 
-    let evaluation_claims : [F128; 5] = layer2.iter().map(|poly| evaluate(&poly, &pt)).collect::<Vec<F128>>().try_into().unwrap();
+    let evaluation_claims : [F128; 5] = layer2.iter().map(|poly| evaluate(&poly, &pt, &mut eq_scratch)).collect::<Vec<F128>>().try_into().unwrap();
 
     let evaluations_finish = Instant::now();
 
@@ -59,11 +66,19 @@ pub fn main_protocol() {
 
     // ------------------ Boolcheck layer ---------------------
 
+    let layer1_for_boolcheck = layer1.clone();
+    let boolcheck_pow3 = 3usize.pow((c + 1) as u32);
+    let boolcheck_pow2 = 1 << (num_vars - c - 1);
+    let boolcheck_pow3_adj = boolcheck_pow3 / 3 * 2;
+    let boolcheck_ext = vec![F128::zero(); boolcheck_pow3 * boolcheck_pow2];
+    let boolcheck_tables_ext : Vec<Vec<F128>> = (0..5).map(|_| vec![F128::zero(); boolcheck_pow3_adj * boolcheck_pow2]).collect();
+    let boolcheck_eq_sequence = (0..num_vars).map(|i| vec![F128::zero(); 1 << i]).collect();
+
     let boolcheck_start = Instant::now();
 
     let prover = BoolCheck::new(
         f,
-        layer1.clone(), 
+        layer1_for_boolcheck, 
         c,
         evaluation_claims,
         pt.clone()
@@ -71,10 +86,10 @@ pub fn main_protocol() {
 
     let boolcheck_init = Instant::now();
 
-    println!(">>>> Initialization (cloning) took: {} ms", (boolcheck_init - boolcheck_start).as_millis());
+    println!(">>>> Initialization took: {} ms", (boolcheck_init - boolcheck_start).as_millis());
 
     let gamma = F128::rand(rng);
-    let mut prover = prover.folding_challenge(gamma);
+    let mut prover = prover.folding_challenge(gamma, boolcheck_ext, boolcheck_tables_ext, boolcheck_eq_sequence);
 
     let boolcheck_extensions = Instant::now();
 
@@ -121,9 +136,12 @@ pub fn main_protocol() {
 
     println!("... Entering multiopen phase ...");
 
+    let pt = rs;
+    let multi_poly = vec![F128::zero(); 1 << pt.len()];
+    let multi_eq = vec![F128::zero(); 1 << pt.len()];
+
     let multiopen_start = Instant::now();
 
-    let pt = rs;
     let mut pt_inv_orbit = vec![];
 
     let mut tmp = pt.clone();
@@ -144,7 +162,7 @@ pub fn main_protocol() {
         gamma128 *= gamma128;
     }
 
-    let mut prover = prover.folding_challenge(gamma);
+    let mut prover = prover.folding_challenge(gamma, multi_poly, multi_eq);
     
     let mut claim = evaluate_univar(&frob_evals, gamma);
     let mut rs = vec![];
@@ -177,18 +195,26 @@ pub fn main_protocol() {
 
     println!("... Entering linear layer ...");
 
-    let linlayer_start = Instant::now();
-
     let pt = rs;
     let matrix = KeccakLinMatrix::new();
     let evals : [F128; 5] = evals.try_into().unwrap();
 
     let num_active_vars = 10;
+    let lin_chunk = 1 << num_active_vars;
+    let lin_eq_dormant = vec![F128::zero(); 1 << (pt.len() - num_active_vars)];
+    let lin_p_polys = vec![vec![F128::zero(); lin_chunk]; 5];
+    let lin_eq = vec![F128::zero(); lin_chunk];
+    let lin_gamma_eqs = vec![F128::zero(); 5 * lin_chunk];
+    let lin_q = vec![F128::zero(); 5 * lin_chunk];
+    let lin_q_polys = vec![vec![F128::zero(); lin_chunk]; 5];
+    let layer0_for_lincheck = layer0.clone();
 
-    let prover = Lincheck::new(layer0.clone(), pt.clone(), matrix, num_active_vars, evals);
+    let linlayer_start = Instant::now();
+
+    let prover = Lincheck::new(layer0_for_lincheck, pt.clone(), matrix, num_active_vars, evals);
 
     let gamma = F128::rand(rng);
-    let mut prover = prover.folding_challenge(gamma);
+    let mut prover = prover.folding_challenge(gamma, lin_eq_dormant, lin_p_polys, lin_eq, lin_gamma_eqs, lin_q, lin_q_polys);
     let mut claim = evaluate_univar(&evals, gamma);
 
     let linlayer_clone_restrict = Instant::now();
@@ -209,8 +235,10 @@ pub fn main_protocol() {
 
     assert!(l0_evals.len() == 5);
 
-    let eq1 = eq_poly(&pt[..num_active_vars]);
-    let eq0 = eq_poly(&rs);
+    let mut eq1 = vec![F128::zero(); 1 << num_active_vars];
+    let mut eq0 = vec![F128::zero(); 1 << rs.len()];
+    eq_poly(&pt[..num_active_vars], &mut eq1);
+    eq_poly(&rs, &mut eq0);
     let mut adj_eq_vec = vec![];
 
     let mut mult = F128::one();
@@ -243,8 +271,9 @@ pub fn main_protocol() {
 
     rs.extend(pt[num_active_vars..].iter().map(|x| *x));
 
+    let mut eq_scratch = vec![F128::zero(); 1 << rs.len()];
     for i in 0..5 {
-        assert!(evaluate(&layer0[i], &rs) == l0_evals[i]);
+        assert!(evaluate(&layer0[i], &rs, &mut eq_scratch) == l0_evals[i]);
     }
     println!(">>>> Main cycle took {} ms", (linlayer_end - linlayer_clone_restrict).as_millis());
 

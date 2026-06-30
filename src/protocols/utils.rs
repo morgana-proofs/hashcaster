@@ -1,10 +1,10 @@
-use std::{mem::{MaybeUninit}, sync::atomic::{AtomicU64, Ordering}, thread::sleep, time::{Duration, Instant}};
+use std::{sync::atomic::{AtomicU64, Ordering}, time::Instant};
 
 use bytemuck::{cast, cast_slice};
 use num_traits::{One, Zero};
 use rayon::{iter::{IndexedParallelIterator, IntoParallelIterator, IntoParallelRefIterator, IntoParallelRefMutIterator, ParallelIterator}, slice::{ParallelSlice, ParallelSliceMut}};
 use crate::{
-    backend::autodetect::{v_movemask_epi8, v_slli_epi64}, field::{pi, F128}, precompute::frobenius_table::FROBENIUS, ptr_utils::{AsSharedConstPtr, AsSharedMUConstPtr, AsSharedMUMutPtr, AsSharedMutPtr, UninitArr, UnsafeIndexMut, UnsafeIndexRaw, UnsafeIndexRawMut}, utils::{log2_exact, u128_idx}
+    backend::autodetect::{v_movemask_epi8, v_slli_epi64}, field::{pi, F128}, precompute::frobenius_table::FROBENIUS, ptr_utils::{AsSharedConstPtr, AsSharedMutPtr, UnsafeIndexRaw, UnsafeIndexRawMut}, utils::{log2_exact, u128_idx}
 };
 use itertools::Itertools;
 
@@ -46,30 +46,13 @@ pub fn untwist_evals(twisted_evals: &mut [F128]) {
     twisted_evals.copy_from_slice(&untwisted);
 }
 
-pub fn eq_poly_legacy(pt: &[F128]) -> Vec<F128> {
+pub fn eq_poly(pt: &[F128], ret: &mut [F128]) {
     let l = pt.len();
-    let mut ret = Vec::with_capacity(1 << l);
-    ret.push(F128::one());
-    for i in 0..l {
-        let half = 1 << i;
-        for j in 0..half {
-            ret.push(pt[i] * ret[j]);
-            let tmp = ret[half + j];
-            ret[j] += tmp;
-        }
-
-    }
-    ret
-}
-
-pub fn eq_poly(pt: &[F128]) -> Vec<F128> {
-    let l = pt.len();
-    let mut ret = UninitArr::new(1 << l);
+    assert!(ret.len() == 1 << l);
     let ptr = ret.as_shared_mut_ptr();
     unsafe{
         *ptr.get_mut(0) = F128::one();
         for i in 0..l {
-
             let half = 1 << i;
             #[cfg(not(feature = "parallel"))]
             let iter = (0 .. half).into_iter();
@@ -81,40 +64,38 @@ pub fn eq_poly(pt: &[F128]) -> Vec<F128> {
                 *ptr.get_mut(j) += *ptr.get(j + half);
             }).count();
         }
-    ret.assume_init()
     }
 }
 
-pub fn eq_poly_sequence(pt: &[F128]) -> Vec<Vec<F128>> {
-
+pub fn eq_poly_sequence(pt: &[F128], ret: &mut [Vec<F128>]) {
     let l = pt.len();
-    let mut ret = Vec::with_capacity(l + 1);
-    ret.push(vec![F128::one()]);
+    assert!(ret.len() == l + 1);
+    assert!(ret[0].len() == 1);
+    ret[0][0] = F128::one();
 
     for i in 1..(l+1) {
-        let last = &ret[i-1];
+        let (prefix, suffix) = ret.split_at_mut(i);
+        let last = &prefix[i-1];
         let multiplier = pt[l-i];
-        let mut incoming = UninitArr::<F128>::new(1 << i);
-        unsafe{
+        let incoming = &mut suffix[0];
+        assert!(incoming.len() == 1 << i);
         let ptr = incoming.as_shared_mut_ptr();
 
-            #[cfg(not(feature = "parallel"))]
-            let iter = (0 .. (1 << (i-1))).into_iter();
+        #[cfg(not(feature = "parallel"))]
+        let iter = (0 .. (1 << (i-1))).into_iter();
 
-            #[cfg(feature = "parallel")]
-            let iter = (0 .. 1 << (i-1)).into_par_iter();
+        #[cfg(feature = "parallel")]
+        let iter = (0 .. 1 << (i-1)).into_par_iter();
 
-            iter.map(|j|{
+        iter.map(|j|{
+            unsafe{
                 let w = last[j];
                 let m = multiplier * w;
                 * ptr.get_mut(2*j) = w + m;
                 * ptr.get_mut(2*j + 1) = m;
-            }).count();
-            ret.push(incoming.assume_init());
-        }
+            }
+        }).count();
     }
-
-    ret
 }
 
 
@@ -122,12 +103,13 @@ pub fn eq_ev(x: &[F128], y: &[F128]) -> F128 {
     x.iter().zip_eq(y.iter()).fold(F128::one(), |acc, (x, y)| acc * (F128::one() + x + y))
 }
 
-pub fn evaluate(poly: &[F128], pt: &[F128]) -> F128 {
+pub fn evaluate(poly: &[F128], pt: &[F128], eq: &mut [F128]) -> F128 {
     assert!(poly.len() == 1 << pt.len());
+    eq_poly(pt, eq);
     #[cfg(not(feature = "parallel"))]
-    let ret = poly.iter().zip_eq(eq_poly(pt)).fold(F128::zero(), |acc, (x, y)| acc + *x * y);
+    let ret = poly.iter().zip_eq(eq.iter()).fold(F128::zero(), |acc, (x, y)| acc + *x * *y);
     #[cfg(feature = "parallel")]
-    let ret = poly.par_iter().zip(eq_poly(pt)).map(|(x, y)| *x * y).reduce(||F128::zero(), |a, b| a + b);
+    let ret = poly.par_iter().zip(eq.par_iter()).map(|(x, y)| *x * *y).reduce(||F128::zero(), |a, b| a + b);
     ret
 }
 
@@ -217,121 +199,6 @@ pub fn compute_trit_mappings(c: usize)  -> (Vec<u16>, Vec<u16>) {
     (bit_mapping, trit_mapping)
 }
 
-/// Makes table 3^{c+1} * 2^{dims - c - 1}
-pub fn extend_table(table: &[F128], dims: usize, c: usize, trits_mapping: &[u16]) -> Vec<F128> {
-    assert!(table.len() == 1 << dims);
-    assert!(c < dims);
-    let pow3 = 3usize.pow((c + 1) as u32);
-    assert!(pow3 < (1 << 15) as usize, "This is too large anyway ;)");
-    let pow2 = 2usize.pow((dims - c - 1) as u32);
-    let mut ret = UninitArr::new(pow3 * pow2);
-    unsafe{
-
-        #[cfg(feature = "parallel")]
-        let tchunks = table.par_chunks(1 << (c + 1));
-        #[cfg(feature = "parallel")]
-        let rchunks = ret.par_chunks_mut(pow3);
-
-        #[cfg(not(feature = "parallel"))]
-        let tchunks = table.chunks(1 << (c + 1));
-        #[cfg(not(feature = "parallel"))]
-        let rchunks = ret.chunks_mut(pow3);
-
-
-        tchunks.zip(rchunks).map(|(table_chunk, ret_chunk)| {
-            for j in 0..pow3 {
-                let offset = trits_mapping[j];
-                if offset % 2 == 0 {
-                    ret_chunk[j] = MaybeUninit::new(table_chunk[(offset >> 1) as usize]);
-                } else {
-                    ret_chunk[j] = MaybeUninit::new(
-                        ret_chunk[j - offset as usize].assume_init()
-                        + ret_chunk[j - 2 * offset as usize].assume_init()
-                    );
-                }
-            }
-        }).count();
-    }
-    unsafe {ret.assume_init()}
-}
-
-/// Extends two tables at the same time and ANDs them
-/// Gives some advantage because we skip 1/3 of writes into p_ext and q_ext.
-pub fn extend_2_tables_legacy(p: &[F128], q: &[F128], dims: usize, c: usize, trit_mapping: &[u16]) -> Vec<F128> {
-    assert!(p.len() == 1 << dims);
-    assert!(q.len() == 1 << dims);
-    assert!(c < dims);
-    let pow3 = 3usize.pow((c + 1) as u32);
-    let pow3_adj = pow3 / 3 * 2;
-    assert!(pow3 < (1 << 15) as usize, "This is too large anyway ;)");
-    let pow2 = 2usize.pow((dims - c - 1) as u32);
-    let mut p_ext = vec![MaybeUninit::uninit(); (pow3 * 2) / 3  * pow2];
-    let mut q_ext = vec![MaybeUninit::uninit(); (pow3 * 2) / 3 * pow2];
-    let mut ret = UninitArr::new(pow3 * pow2);
-
-    // Slice management seems to have some small overhead at this scale, possibly replace with
-    // raw pointer accesses? *Insert look what they have to do to mimic the fraction of our power meme*
-    unsafe{
-        #[cfg(not(feature = "parallel"))]
-        let pchunks = p.chunks(1 << (c + 1));
-        #[cfg(not(feature = "parallel"))]
-        let qchunks = q.chunks(1 << (c + 1));
-        #[cfg(not(feature = "parallel"))]
-        let p_ext_chunks = p_ext.chunks_mut(pow3_adj);
-        #[cfg(not(feature = "parallel"))]
-        let q_ext_chunks = q_ext.chunks_mut(pow3_adj);
-        #[cfg(not(feature = "parallel"))]
-        let ret_chunks = ret.chunks_mut(pow3);
-
-        #[cfg(feature = "parallel")]
-        let pchunks = p.par_chunks(1 << (c + 1));
-        #[cfg(feature = "parallel")]
-        let qchunks = q.par_chunks(1 << (c + 1));
-        #[cfg(feature = "parallel")]
-        let p_ext_chunks = p_ext.par_chunks_mut(pow3_adj);
-        #[cfg(feature = "parallel")]
-        let q_ext_chunks = q_ext.par_chunks_mut(pow3_adj);
-        #[cfg(feature = "parallel")]
-        let ret_chunks = ret.par_chunks_mut(pow3);
-
-        pchunks.zip(qchunks).zip(
-        p_ext_chunks.zip(q_ext_chunks)
-        ).zip(
-        ret_chunks).map(|(((p, q), (p_ext, q_ext)), ret)| {
-            for j in 0..pow3_adj {
-                let offset = trit_mapping[j] as usize;
-                if offset % 2 == 0 {
-                    p_ext[j] = MaybeUninit::new(
-                        p[offset >> 1]
-                    );
-                    q_ext[j] = MaybeUninit::new(
-                        q[offset >> 1]
-                    );
-                } else {
-                    p_ext[j] = MaybeUninit::new(
-                        p_ext[j - offset].assume_init()
-                        + p_ext[j - 2 * offset].assume_init()
-                    );
-                    q_ext[j] = MaybeUninit::new(
-                        q_ext[j - offset].assume_init()
-                        + q_ext[j - 2 * offset].assume_init()
-                    );
-                }
-                ret[j] = MaybeUninit::new(p_ext[j].assume_init() & q_ext[j].assume_init())
-
-            };
-            for j in pow3_adj..pow3{
-                let offset = trit_mapping[j] as usize;
-                ret[j] = MaybeUninit::new(
-                    (p_ext[j - offset].assume_init() + p_ext[j - 2 * offset].assume_init()) &
-                    (q_ext[j - offset].assume_init() + q_ext[j - 2 * offset].assume_init())
-                )
-            }
-        }).count();
-    }
-    unsafe{ret.assume_init()}
-}
-
 /// Extends n tables and applies a formula F to them.
 /// Warning: n must be low enough, or you will get a lot of cache misses (each table_ext consumes ~ 3^c * 32 bytes of cache).
 /// For standard value of c, it gives 8Kb.
@@ -347,7 +214,9 @@ pub fn extend_n_tables<
     trit_mapping: &[u16],
     f_lin: F_LIN,
     f_quad: F_QUAD,
-) -> Vec<F128> {
+    ret: &mut [F128],
+    tables_ext: &mut [Vec<F128>],
+) {
     assert!(tables.len() == N);
     let dims = log2_exact(tables[0].len());
     for table in tables {
@@ -358,13 +227,11 @@ pub fn extend_n_tables<
     let pow3_adj = pow3 / 3 * 2;
     assert!(pow3 < (1 << 15) as usize, "This is too large anyway ;)");
     let pow2 = 2usize.pow((dims - c - 1) as u32);
-
-    let mut tables_ext = vec![];
-    for _ in 0..N {
-        tables_ext.push(UninitArr::new((pow3 * 2) / 3  * pow2))
+    assert!(ret.len() == pow3 * pow2);
+    assert!(tables_ext.len() == N);
+    for table_ext in tables_ext.iter() {
+        assert!(table_ext.len() == pow3_adj * pow2);
     }
-
-    let mut ret = UninitArr::new(pow3 * pow2);
 
     // And we don't have multizip, so I guess I'm gonna write it with raw accesses once again. shrug
 
@@ -429,7 +296,6 @@ pub fn extend_n_tables<
         }).count();
         
     }
-    unsafe{ret.assume_init()}
 }
 
 
@@ -456,7 +322,8 @@ pub fn restrict(polys: &[&[F128]], coords: &[F128], dims: usize) -> Vec<F128> {
     let chunk_size = (1 << coords.len());
     let num_chunks = 1 << (dims - coords.len());
 
-    let eq = eq_poly(coords);
+    let mut eq = vec![F128::zero(); 1 << coords.len()];
+    eq_poly(coords, &mut eq);
 
     assert!(eq.len() % 16 == 0, "Technical condition for now.");
 
@@ -513,76 +380,6 @@ pub fn restrict(polys: &[&[F128]], coords: &[F128], dims: usize) -> Vec<F128> {
         }
         ).count();
     }
-    ret
-}
-
-//#[unroll::unroll_for_loops]
-pub fn restrict_legacy(poly: &[F128], coords: &[F128], dims: usize) -> Vec<Vec<F128>> {
-    assert!(poly.len() == 1 << dims);
-    assert!(coords.len() <= dims);
-
-    let chunk_size = (1 << coords.len());
-    let num_chunks = 1 << (dims - coords.len());
-
-    let eq = eq_poly(coords);
-
-    assert!(eq.len() % 16 == 0, "Technical condition for now.");
-
-    let mut eq_sums = Vec::with_capacity(256 * eq.len() / 8);
-
-    for i in 0..eq.len()/8 {
-        eq_sums.push(F128::zero());
-        for j in 1..256 {
-            let (sum_idx, eq_idx) = drop_top_bit(j);
-            let tmp = eq[i * 8 + eq_idx] + eq_sums[i * 256 + sum_idx];
-            eq_sums.push(tmp);
-        }
-    }
-
-    let mut ret = vec![vec![F128::zero(); num_chunks]; 128];
-    let ret_ptrs : [_; 128] = ret.iter_mut().map(|v| v.as_shared_mut_ptr())
-        .collect_vec()
-        .try_into()
-        .unwrap_or_else(|_|panic!());
-
-    #[cfg(feature = "parallel")]
-    let iter = (0..num_chunks).into_par_iter();
-
-    #[cfg(not(feature = "parallel"))]
-    let iter = (0..num_chunks).into_iter();
-
-    iter.map(|i| {
-        for j in 0 .. eq.len() / 16 { // Step by 16 
-            let v0 = &eq_sums[j * 512 .. j * 512 + 256];
-            let v1 = &eq_sums[j * 512 + 256 .. j * 512 + 512];
-            let bytearr = cast_slice::<F128, [u8; 16]>(
-                &poly[i * chunk_size + j * 16 .. i * chunk_size + (j + 1) * 16]
-            );
-
-            // Iteration over bytes
-            for s in 0..16 {
-                let mut t = [
-                    bytearr[0][s], bytearr[1][s], bytearr[2][s], bytearr[3][s],
-                    bytearr[4][s], bytearr[5][s], bytearr[6][s], bytearr[7][s],
-                    bytearr[8][s], bytearr[9][s], bytearr[10][s], bytearr[11][s],
-                    bytearr[12][s], bytearr[13][s], bytearr[14][s], bytearr[15][s],
-                ];
- 
-                for u in 0..8 {
-                    let bits = v_movemask_epi8(t) as u16;
-
-                    unsafe{
-                        * ret_ptrs[s*8 + 7 - u].get_mut(i) += v0[(bits & 255) as usize];
-                        * ret_ptrs[s*8 + 7 - u].get_mut(i) += v1[((bits >> 8) & 255) as usize];
-                    }
-                    t = v_slli_epi64::<1>(t);
-                }
-            }
-
-        }
-    }
-    ).count();
-
     ret
 }
 
@@ -708,30 +505,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn restrict_vs_restrict_legacy() {
-        let rng = &mut OsRng;
-        let num_vars = 8;
-        let num_vars_to_restrict = 5;
-        let pt : Vec<_> = repeat_with(|| F128::rand(rng)).take(num_vars).collect();
-        let poly0 : Vec<_> = repeat_with(|| F128::rand(rng)).take(1 << num_vars).collect();
-        let poly1 : Vec<_> = repeat_with(|| F128::rand(rng)).take(1 << num_vars).collect();
-        let poly2 : Vec<_> = repeat_with(|| F128::rand(rng)).take(1 << num_vars).collect();
-
-        let polys = [poly0.as_slice(), poly1.as_slice(), poly2.as_slice()];
-
-        let new_answer = restrict(&polys, &pt[..num_vars_to_restrict], num_vars);
-
-        let mut old_answer = vec![];
-        for i in 0..3 {
-            old_answer.push(
-                restrict_legacy(polys[i], &pt[..num_vars_to_restrict], num_vars)
-            );
-        }
-
-        assert!(old_answer.into_iter().map(|x|x.into_iter().flatten()).flatten().collect::<Vec<_>>() == new_answer);
-    }
-
-    #[test]
     fn twist_untwist() {
         let rng = &mut OsRng;
         let lhs : Vec<_> = repeat_with(|| F128::rand(rng)).take(128).collect();
@@ -758,9 +531,10 @@ mod tests {
 
         let mut coord_evs = vec![];
 
+        let mut eq = vec![F128::zero(); 1 << pt.len()];
         for i in 0..128 {
             let poly_i : Vec<_> = poly.iter().map(|x| F128::new(u128_idx(&x.raw, i))).collect();
-            coord_evs.push(evaluate(&poly_i, &pt));
+            coord_evs.push(evaluate(&poly_i, &pt, &mut eq));
         }
 
         let mut tmp = F128::zero();
@@ -768,7 +542,7 @@ mod tests {
             tmp += coord_evs[i] * F128::basis(i);
         }
 
-        assert!(tmp == evaluate(&poly, &pt));
+        assert!(tmp == evaluate(&poly, &pt, &mut eq));
 
         let mut pt_inv_orbit = vec![];
         for i in 0..128i32 {
@@ -777,7 +551,7 @@ mod tests {
             )
         }
 
-        let twisted_evs : Vec<_> = (0..128).map(|i| evaluate(&poly, &pt_inv_orbit[i])).collect();
+        let twisted_evs : Vec<_> = (0..128).map(|i| evaluate(&poly, &pt_inv_orbit[i], &mut eq)).collect();
 
         twist_evals(&mut coord_evs);
         assert!(twisted_evs == coord_evs);

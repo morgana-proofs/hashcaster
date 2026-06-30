@@ -1,7 +1,7 @@
 use num_traits::{One, Zero};
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
 
-use crate::{field::F128, protocols::boolcheck::FnPackage, ptr_utils::{AsSharedMUMutPtr, UninitArr, UnsafeIndexRawMut}};
+use crate::{field::F128, protocols::boolcheck::FnPackage, ptr_utils::{AsSharedMutPtr, UnsafeIndexRawMut}};
 
 /// 111111111...1 in standard basis
 fn neg(x: F128) -> F128 {
@@ -107,16 +107,13 @@ impl FnPackage<5, 5> for ChiPackage {
     }
 }
 
-pub fn chi_round_witness(polys: &[Vec<F128>; 5]) -> [Vec<F128>; 5] {
+pub fn chi_round_witness_into(polys: &[Vec<F128>; 5], ret: &mut [Vec<F128>; 5]) {
     let l = polys[0].len();
     for i in 1..5 {
         assert!(polys[i].len() == l);
+        assert!(ret[i].len() == l);
     }
-
-    let mut ret = vec![];
-    for i in 0..5 {
-        ret.push(UninitArr::<F128>::new(l));
-    }
+    assert!(ret[0].len() == l);
 
     let ret_ptrs : Vec<_> = ret.iter_mut().map(|arr| arr.as_shared_mut_ptr()).collect();
 
@@ -136,8 +133,6 @@ pub fn chi_round_witness(polys: &[Vec<F128>; 5]) -> [Vec<F128>; 5] {
             *ret_ptrs[4].get_mut(i) = tmp[4];
         }
     }).count();
-
-    ret.into_iter().map(|arr| unsafe{arr.assume_init()}).collect::<Vec<_>>().try_into().unwrap()
 }
 
 #[cfg(test)]
@@ -211,18 +206,11 @@ mod tests {
         }
         let polys : [Vec<F128>; 5] = polys.try_into().unwrap();
     
-//        let (bit_mapping, trit_mapping) = compute_trit_mappings(c);
-        // let expected_ext = (0..5).map(|i| {
-        //     let polys : Vec<&[F128]>= polys.iter().map(|v|v.as_slice()).collect();
-        //     let f = |arg: [F128; 5]| {
-        //         chi_compressed(arg)[i]
-        //     };
-        //     extend_n_tables(&polys, c, &trit_mapping, &f)
-        // }).collect::<Vec<_>>();
+        let mut output : [Vec<F128>; 5] = (0..5).map(|_| vec![F128::zero(); 1 << num_vars]).collect::<Vec<_>>().try_into().unwrap();
+        chi_round_witness_into(&polys, &mut output);
 
-        let output = chi_round_witness(&polys);
-
-        let evaluation_claims : [F128; 5] = output.iter().map(|poly| evaluate(&poly, &pt)).collect::<Vec<F128>>().try_into().unwrap();
+        let mut eq = vec![F128::zero(); 1 << pt.len()];
+        let evaluation_claims : [F128; 5] = output.iter().map(|poly| evaluate(&poly, &pt, &mut eq)).collect::<Vec<F128>>().try_into().unwrap();
         let f = ChiPackage{};
 
         let start = Instant::now();
@@ -237,7 +225,13 @@ mod tests {
 
 
         let gamma = F128::rand(rng);
-        let mut prover = prover.folding_challenge(gamma);
+        let pow3 = 3usize.pow((c + 1) as u32);
+        let pow2 = 1 << (num_vars - c - 1);
+        let pow3_adj = pow3 / 3 * 2;
+        let ext = vec![F128::zero(); pow3 * pow2];
+        let tables_ext : Vec<Vec<F128>> = (0..5).map(|_| vec![F128::zero(); pow3_adj * pow2]).collect();
+        let eq_sequence = (0..num_vars).map(|i| vec![F128::zero(); 1 << i]).collect();
+        let mut prover = prover.folding_challenge(gamma, ext, tables_ext, eq_sequence);
 
         // let ext_l = expected_ext[0].len();
         // let expected_ext = (0..ext_l).map(|i| {
@@ -280,7 +274,8 @@ mod tests {
                 let poly_i : Vec<F128> = poly.iter().map(|value| {
                     F128::new(u128_idx(&value.raw(), i))
                 }).collect();
-                evaluate(&poly_i, &rs)
+                let mut eq = vec![F128::zero(); 1 << rs.len()];
+                evaluate(&poly_i, &rs, &mut eq)
             })
         }).flatten().collect();
 
