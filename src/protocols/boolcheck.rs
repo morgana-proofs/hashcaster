@@ -82,29 +82,32 @@ impl<const N: usize, const M: usize, F: FnPackage<N, M>> FnPackageFolded<N> for 
 /// second with arguments read from data[2*i+1], data[2*i+1+l], ... and third with arguments combined from two
 /// previous ones: (data[2*i]+data[2*i+1]), (data[2*i+l] + data[2*i+1+l])...
 pub struct BoolCheck<
+    'a,
     const N: usize,
     const M: usize,
     F: FnPackage<N, M>,
 > {
     f: F,
     pt: Vec<F128>,
-    polys: [Vec<F128>; N], // Input polynomials.
+    polys: &'a [Vec<F128>; N], // Input polynomials.
     c: usize, // PHASE SWITCH, round < c => PHASE 1.
     evaluation_claims: [F128; M],
 }
 
 impl<
+    'a,
     const N: usize,
     const M: usize,
     F: FnPackage<N, M>,
-> BoolCheck<N, M, F> {
-    pub fn new(f: F, polys: [Vec<F128>; N], c: usize, evaluation_claims: [F128; M], pt: Vec<F128>) -> Self {
+> BoolCheck<'a, N, M, F> {
+    pub fn new(f: F, polys: &'a [Vec<F128>; N], c: usize, evaluation_claims: [F128; M], pt: Vec<F128>) -> Self {
         Self{f, pt, polys, c, evaluation_claims}
     }
 
     /// Folding round. This is an initial message of the verifier.
     pub fn folding_challenge(self, gamma: F128, ext: Vec<F128>, ext_scratch: Vec<F128>, mut tables_ext: Vec<Vec<F128>>, eq_sequence: Vec<Vec<F128>>)
      -> BoolCheckSingle<
+        'a,
         N,
         impl FnPackageFolded<N>,
     > {
@@ -138,13 +141,14 @@ impl<
 }
 
 pub struct BoolCheckSingle<
+    'a,
     const N: usize,
     F: FnPackageFolded<N>,
 > {
     f: F,
     pt: Vec<F128>,
 
-    polys: [Vec<F128>; N], // Input polynomials.
+    polys: &'a [Vec<F128>; N], // Input polynomials.
     pub ext: Option<Vec<F128>>, // Extension of output on 3^{c+1} * 2^{n-c-1}, during first phase.
     ext_scratch: Option<Vec<F128>>,
     ext_len: usize,
@@ -166,10 +170,11 @@ pub struct BoolCheckOutput {
 }
 
 impl<
+    'a,
     const N: usize,
     F: FnPackageFolded<N>,
-> BoolCheckSingle<N, F> {
-    pub fn new(f: F, pt: Vec<F128>, polys: [Vec<F128>; N], c: usize, evaluation_claim: F128, mut ext: Vec<F128>, ext_scratch: Vec<F128>, tables_ext: &mut [Vec<F128>], mut eq_sequence: Vec<Vec<F128>>) -> Self {
+> BoolCheckSingle<'a, N, F> {
+    pub fn new(f: F, pt: Vec<F128>, polys: &'a [Vec<F128>; N], c: usize, evaluation_claim: F128, mut ext: Vec<F128>, ext_scratch: Vec<F128>, tables_ext: &mut [Vec<F128>], mut eq_sequence: Vec<Vec<F128>>) -> Self {
         for poly in polys.iter() {
             assert!(poly.len() == 1 << pt.len());
         }
@@ -241,9 +246,10 @@ impl<
 }
 
 impl<
+    'a,
     const N: usize,
     F: FnPackageFolded<N>
-> SumcheckObject for BoolCheckSingle<N, F> {
+> SumcheckObject for BoolCheckSingle<'a, N, F> {
 
     fn is_reverse_order(&self) -> bool {
         false
@@ -572,9 +578,10 @@ mod tests {
 
         let start = Instant::now();
 
+        let polys = [p, q];
         let instance = BoolCheck::new(
             f,  
-            [p, q], 
+            &polys, 
             phase_switch, 
             [evaluation_claim],
             pt.clone()
@@ -650,8 +657,7 @@ mod tests {
 
         let phase_switch = 5;
 
-        let pc = p.clone();
-        let qc = q.clone();
+        let polys = [p, q];
 
         let f = AndPackage{};
 
@@ -659,7 +665,7 @@ mod tests {
 
         let instance = BoolCheck::new(
             f,
-            [pc, qc], 
+            &polys, 
             phase_switch, 
             [evaluation_claim],
             pt.clone()
@@ -723,12 +729,12 @@ mod tests {
         }
     
 
-        let polys = [p, q];
-
-        let instance = MulticlaimCheck::new(&polys, pt, frob_evals.clone());
+        let instance = MulticlaimCheck::new(&polys, &pt, &frob_evals);
         let multi_poly = vec![F128::zero(); 1 << num_vars];
         let multi_eq = vec![F128::zero(); 1 << num_vars];
-        let mut instance = instance.folding_challenge(gamma, multi_poly, multi_eq);
+        let multi_p_scratch = vec![vec![F128::zero(); 1 << num_vars]; 1];
+        let multi_q_scratch = vec![vec![F128::zero(); 1 << num_vars]; 1];
+        let mut instance = instance.folding_challenge(gamma, multi_poly, multi_eq, multi_p_scratch, multi_q_scratch);
         
 
         let mut claim = evaluate_univar(&frob_evals, gamma); //.iter().zip(gamma_pows.iter()).map(|(x, y)| *x * y).fold(F128::zero(), |x, y| x + y);

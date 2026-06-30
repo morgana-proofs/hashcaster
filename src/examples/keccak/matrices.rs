@@ -387,6 +387,7 @@ mod tests {
         for i in 0..5 {
             polys.push((0 .. 1 << num_vars).map(|_| F128::rand(rng)).collect())
         };
+        let polys : [Vec<F128>; 5] = polys.try_into().unwrap();
 
         let polys_refs = polys.iter().map(|x| x.as_slice()).collect::<Vec<_>>().try_into().unwrap();
         let mut m_p : [Vec<F128>; 5] = (0..5).map(|_| vec![F128::zero(); 1 << num_vars]).collect::<Vec<_>>().try_into().unwrap();
@@ -402,11 +403,9 @@ mod tests {
 
         let label1 = Instant::now();
 
-        let p_ = polys.clone().try_into().unwrap();
-
         let label2 = Instant::now();
 
-        let prover = Lincheck::<5, 5, _>::new(p_, pt.clone(), m, num_active_vars, initial_claims);
+        let prover = Lincheck::<5, 5, _>::new(&polys, &pt, m, num_active_vars, initial_claims);
 
 
         let gamma = F128::rand(rng);
@@ -417,7 +416,9 @@ mod tests {
         let gamma_eqs = vec![F128::zero(); 5 * chunk];
         let q = vec![F128::zero(); 5 * chunk];
         let q_polys = vec![vec![F128::zero(); chunk]; 5];
-        let mut prover = prover.folding_challenge(gamma, eq_dormant, p_polys, eq, gamma_eqs, q, q_polys);
+        let p_scratch = vec![vec![F128::zero(); chunk]; 5];
+        let q_scratch = vec![vec![F128::zero(); chunk]; 5];
+        let mut prover = prover.folding_challenge(gamma, eq_dormant, p_polys, eq, gamma_eqs, q, q_polys, p_scratch, q_scratch);
 
         let label3 = Instant::now();
 

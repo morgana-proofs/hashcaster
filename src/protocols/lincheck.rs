@@ -132,17 +132,17 @@ impl LinOp for IdentityMatrix {
 /// to the vector of values of a polynomial eq_poly(pt[0..a]).
 /// Lincheck expects a matrix of size N*2^a x M*2^a, and it will be treated as matrix from N chunks of
 /// size 2^a to M chunks of size 2^a.
-pub struct Lincheck<const N: usize, const M: usize, L: LinOp> {
+pub struct Lincheck<'a, const N: usize, const M: usize, L: LinOp> {
     matrix: L,
-    polys: [Vec<F128>; N],
-    pt: Vec<F128>,
+    polys: &'a [Vec<F128>; N],
+    pt: &'a [F128],
     num_vars: usize,
     num_active_vars: usize,
     initial_claims: [F128; M],
 }
 
-impl<const N: usize, const M: usize, L: LinOp> Lincheck<N, M, L> {
-    pub fn new(polys: [Vec<F128>; N], pt: Vec<F128>, matrix: L, num_active_vars: usize, initial_claims: [F128; M]) -> Self {
+impl<'a, const N: usize, const M: usize, L: LinOp> Lincheck<'a, N, M, L> {
+    pub fn new(polys: &'a [Vec<F128>; N], pt: &'a [F128], matrix: L, num_active_vars: usize, initial_claims: [F128; M]) -> Self {
         assert!(matrix.n_in() == N * (1 << num_active_vars));
         assert!(matrix.n_out() == M * (1 << num_active_vars));
         let num_vars = pt.len();
@@ -153,7 +153,7 @@ impl<const N: usize, const M: usize, L: LinOp> Lincheck<N, M, L> {
         Self { matrix, polys, pt, num_vars, num_active_vars, initial_claims }
     } 
 
-    pub fn folding_challenge(self, gamma: F128, mut eq_dormant: Vec<F128>, mut p_polys: Vec<Vec<F128>>, mut eq: Vec<F128>, mut gamma_eqs: Vec<F128>, mut q: Vec<F128>, mut q_polys: Vec<Vec<F128>>) -> PreparedLincheck {
+    pub fn folding_challenge(self, gamma: F128, mut eq_dormant: Vec<F128>, mut p_polys: Vec<Vec<F128>>, mut eq: Vec<F128>, mut gamma_eqs: Vec<F128>, mut q: Vec<F128>, mut q_polys: Vec<Vec<F128>>, p_scratch: Vec<Vec<F128>>, q_scratch: Vec<Vec<F128>>) -> PreparedLincheck {
         let chunk_size = 1 << self.num_active_vars;
         let pt_active = &self.pt[ .. self.num_active_vars];
         let pt_dormant = &self.pt[self.num_active_vars .. ];
@@ -168,7 +168,7 @@ impl<const N: usize, const M: usize, L: LinOp> Lincheck<N, M, L> {
         }
         
 
-        self.polys.into_iter().enumerate().map(|(i, poly)| {
+        self.polys.iter().enumerate().map(|(i, poly)| {
             let poly_chunks = poly.chunks(chunk_size);
             poly_chunks.enumerate().map(|(j, chunk)| {
                 p_polys[i].iter_mut().zip(chunk.iter()).map(|(p, c)| *p += eq_dormant[j] * c).count();
@@ -203,7 +203,7 @@ impl<const N: usize, const M: usize, L: LinOp> Lincheck<N, M, L> {
         let claim = evaluate_univar(&self.initial_claims, gamma);
 
         PreparedLincheck{
-            object: Prodcheck::new(p_polys, q_polys, claim, false, false)
+            object: Prodcheck::new(p_polys, q_polys, p_scratch, q_scratch, claim, false, false)
         }
     }
 }
@@ -369,11 +369,10 @@ mod tests {
 
         let label0 = Instant::now();
 
-        let p_ = poly.clone();
-
         let label1_5 = Instant::now();
 
-        let prover = Lincheck::<1, 1, _>::new([p_], pt.clone(), linop.clone(), num_active_vars, [initial_claim]);
+        let polys = [poly];
+        let prover = Lincheck::<1, 1, _>::new(&polys, &pt, linop.clone(), num_active_vars, [initial_claim]);
 
         let chunk = 1 << num_active_vars;
         let eq_dormant = vec![F128::zero(); 1 << (pt.len() - num_active_vars)];
@@ -382,7 +381,9 @@ mod tests {
         let gamma_eqs = vec![F128::zero(); chunk];
         let q = vec![F128::zero(); chunk];
         let q_polys = vec![vec![F128::zero(); chunk]; 1];
-        let mut prover = prover.folding_challenge(F128::rand(rng), eq_dormant, p_polys, eq, gamma_eqs, q, q_polys);
+        let p_scratch = vec![vec![F128::zero(); chunk]; 1];
+        let q_scratch = vec![vec![F128::zero(); chunk]; 1];
+        let mut prover = prover.folding_challenge(F128::rand(rng), eq_dormant, p_polys, eq, gamma_eqs, q, q_polys, p_scratch, q_scratch);
 
         let label1 = Instant::now();
 
@@ -436,7 +437,7 @@ mod tests {
         assert!(rs.len() == num_vars);
 
         let mut eq = vec![F128::zero(); 1 << rs.len()];
-        assert!(p_evs[0] == evaluate(&poly, &rs, &mut eq));
+        assert!(p_evs[0] == evaluate(&polys[0], &rs, &mut eq));
 
     }
 

@@ -18,12 +18,12 @@ use super::{prodcheck::Prodcheck, utils::{eq_poly, evaluate, evaluate_univar}};
 
 pub struct MulticlaimCheck<'a, const N: usize> {
     polys: &'a [Vec<F128>; N],
-    pt: Vec<F128>,
-    openings: Vec<F128>,
+    pt: &'a [F128],
+    openings: &'a [F128],
 }
 
 impl<'a, const N: usize> MulticlaimCheck<'a, N> {
-    pub fn new(polys: &'a [Vec<F128>; N], pt: Vec<F128>, openings: Vec<F128>) -> Self {
+    pub fn new(polys: &'a [Vec<F128>; N], pt: &'a [F128], openings: &'a [F128]) -> Self {
         assert!(openings.len() == N * 128);
         for i in 0..N {
             assert!(polys[i].len() == 1 << pt.len());
@@ -31,7 +31,7 @@ impl<'a, const N: usize> MulticlaimCheck<'a, N> {
         Self { polys, pt, openings }
     }
 
-    pub fn folding_challenge(self, gamma: F128, mut poly: Vec<F128>, eq: Vec<F128>) -> MulticlaimCheckSingle<'a, N> {
+    pub fn folding_challenge(self, gamma: F128, mut poly: Vec<F128>, eq: Vec<F128>, p_scratch: Vec<Vec<F128>>, q_scratch: Vec<Vec<F128>>) -> MulticlaimCheckSingle<'a, N> {
         let Self { polys, pt, openings } = self;
     
         let mut gamma_pows = Vec::with_capacity(128 * N);
@@ -66,7 +66,7 @@ impl<'a, const N: usize> MulticlaimCheck<'a, N> {
             o
         }).collect();
 
-        MulticlaimCheckSingle::new(poly, pt, openings, gamma_pows, polys, eq)       
+        MulticlaimCheckSingle::new(poly, pt, openings, gamma_pows, polys, eq, p_scratch, q_scratch)       
 
     }
 }
@@ -78,7 +78,7 @@ pub struct MulticlaimCheckSingle<'a, const N: usize> {
 }
 
 impl<'a, const N: usize> MulticlaimCheckSingle<'a, N> {
-    pub fn new(poly: Vec<F128>, pt: Vec<F128>, openings: Vec<F128>, gamma_pows: Vec<F128>, polys: &'a [Vec<F128>; N], mut eq: Vec<F128>) -> Self {
+    pub fn new(poly: Vec<F128>, pt: &[F128], openings: Vec<F128>, gamma_pows: Vec<F128>, polys: &'a [Vec<F128>; N], mut eq: Vec<F128>, p_scratch: Vec<Vec<F128>>, q_scratch: Vec<Vec<F128>>) -> Self {
         assert!(eq.len() == 1 << pt.len());
         eq_poly(&pt, &mut eq);
         // We want to compute sum \gamma_i * eq(Frob^{-i}(r), x)
@@ -92,6 +92,8 @@ impl<'a, const N: usize> MulticlaimCheckSingle<'a, N> {
             object: Prodcheck::new(
                 vec![poly],
                 vec![eq],
+                p_scratch,
+                q_scratch,
                 *initial_claim,
                 false,
                 false
@@ -153,7 +155,7 @@ mod tests {
 
         let polys = [poly];
 
-        let prover = MulticlaimCheck::new(&polys, pt.clone(), evs.clone());
+        let prover = MulticlaimCheck::new(&polys, &pt, &evs);
         
         let gamma = F128::rand(rng);
         
@@ -162,7 +164,9 @@ mod tests {
 
         let multi_poly = vec![F128::zero(); 1 << num_vars];
         let multi_eq = vec![F128::zero(); 1 << num_vars];
-        let mut prover = prover.folding_challenge(gamma, multi_poly, multi_eq);
+        let multi_p_scratch = vec![vec![F128::zero(); 1 << num_vars]; 1];
+        let multi_q_scratch = vec![vec![F128::zero(); 1 << num_vars]; 1];
+        let mut prover = prover.folding_challenge(gamma, multi_poly, multi_eq, multi_p_scratch, multi_q_scratch);
         let mut gamma_pows = vec![];
         let mut tmp = F128::one();
         for _ in 0..128 {

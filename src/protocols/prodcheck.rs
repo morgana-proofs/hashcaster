@@ -30,6 +30,8 @@ impl Prodcheck {
     pub fn new(
         p_polys: Vec<Vec<F128>>,
         q_polys: Vec<Vec<F128>>,
+        p_scratch: Vec<Vec<F128>>,
+        q_scratch: Vec<Vec<F128>>,
         initial_claim: F128,
         check_init_claim: bool,
         in_reverse_order: bool,
@@ -43,6 +45,12 @@ impl Prodcheck {
         }
 
         let l = p_polys.len();
+        assert!(p_scratch.len() == l);
+        assert!(q_scratch.len() == l);
+        for i in 0..l {
+            assert!(p_scratch[i].len() == 1 << num_vars);
+            assert!(q_scratch[i].len() == 1 << num_vars);
+        }
 
         if check_init_claim {
             let mut expected_claim = F128::zero();
@@ -54,9 +62,6 @@ impl Prodcheck {
 
             assert!(initial_claim == expected_claim);
         }
-
-        let p_scratch = p_polys.iter().map(|p| vec![F128::zero(); p.len()]).collect();
-        let q_scratch = q_polys.iter().map(|q| vec![F128::zero(); q.len()]).collect();
 
         Self {
             active_len: p_polys[0].len(),
@@ -233,7 +238,9 @@ mod tests {
         }
         let mut claim = p_polys.iter().flatten().zip(q_polys.iter().flatten()).map(|(a, b)| *a * b).fold(F128::zero(), |a, b| a + b);
 
-        let mut prover = Prodcheck::new(p_polys.clone(), q_polys.clone(), claim, true, false);
+        let p_scratch = p_polys.iter().map(|p| vec![F128::zero(); p.len()]).collect();
+        let q_scratch = q_polys.iter().map(|q| vec![F128::zero(); q.len()]).collect();
+        let mut prover = Prodcheck::new(p_polys.clone(), q_polys.clone(), p_scratch, q_scratch, claim, true, false);
 
         for i in 0..num_vars {
             let round_poly = prover.round_msg().coeffs(claim);

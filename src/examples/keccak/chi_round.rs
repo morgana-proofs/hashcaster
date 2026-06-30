@@ -217,7 +217,7 @@ mod tests {
  
         let prover = BoolCheck::new(
             f,
-            polys.clone(), 
+            &polys, 
             c,
             evaluation_claims,
             pt.clone()
