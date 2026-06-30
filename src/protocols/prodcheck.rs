@@ -12,6 +12,9 @@ use crate::{field::F128, ptr_utils::{AsSharedMutPtr, UnsafeIndexRawMut}, traits:
 pub struct Prodcheck {
     pub p_polys: Vec<Vec<F128>>,
     pub q_polys: Vec<Vec<F128>>,
+    p_scratch: Vec<Vec<F128>>,
+    q_scratch: Vec<Vec<F128>>,
+    active_len: usize,
     pub claim: F128,
     pub challenges: Vec<F128>,
     num_vars: usize,
@@ -52,9 +55,15 @@ impl Prodcheck {
             assert!(initial_claim == expected_claim);
         }
 
+        let p_scratch = p_polys.iter().map(|p| vec![F128::zero(); p.len()]).collect();
+        let q_scratch = q_polys.iter().map(|q| vec![F128::zero(); q.len()]).collect();
+
         Self {
+            active_len: p_polys[0].len(),
             p_polys,
             q_polys,
+            p_scratch,
+            q_scratch,
             claim: initial_claim,
             challenges: vec![],
             num_vars,
@@ -66,8 +75,9 @@ impl Prodcheck {
     }
 
     pub fn finish(self) -> ProdcheckOutput {
-        let p_evs = self.p_polys.iter().map(|poly| {assert!(poly.len() == 1); poly[0]}).collect();
-        let q_evs = self.q_polys.iter().map(|poly| {assert!(poly.len() == 1); poly[0]}).collect();
+        assert!(self.active_len == 1);
+        let p_evs = self.p_polys.iter().map(|poly| {poly[0]}).collect();
+        let q_evs = self.q_polys.iter().map(|poly| {poly[0]}).collect();
         ProdcheckOutput{p_evs, q_evs}
     }
 }
@@ -87,8 +97,8 @@ impl SumcheckObject for Prodcheck {
         if self.rev_order {
             panic!("Unsupported order.");
         }
-        assert!(self.p_polys[0].len() > 1, "The protocol has already ended.");
-        let half = self.p_polys[0].len() / 2;
+        assert!(self.active_len > 1, "The protocol has already ended.");
+        let half = self.active_len / 2;
         let l = self.p_polys.len();
 
         let round_poly = self.round_msg().coeffs(self.claim);
@@ -100,11 +110,11 @@ impl SumcheckObject for Prodcheck {
         {
             for i in 0..l {
                 for j in 0..half {
-                    self.p_polys[i][j] = self.p_polys[i][2 * j] + (self.p_polys[i][2 * j + 1] + self.p_polys[i][2 * j]) * challenge;
-                    self.q_polys[i][j] = self.q_polys[i][2 * j] + (self.q_polys[i][2 * j + 1] + self.q_polys[i][2 * j]) * challenge;
+                    self.p_scratch[i][j] = self.p_polys[i][2 * j] + (self.p_polys[i][2 * j + 1] + self.p_polys[i][2 * j]) * challenge;
+                    self.q_scratch[i][j] = self.q_polys[i][2 * j] + (self.q_polys[i][2 * j + 1] + self.q_polys[i][2 * j]) * challenge;
                 }
-                self.p_polys[i].truncate(half);
-                self.q_polys[i].truncate(half);
+                std::mem::swap(&mut self.p_polys[i], &mut self.p_scratch[i]);
+                std::mem::swap(&mut self.q_polys[i], &mut self.q_scratch[i]);
             }
         }
 
@@ -113,28 +123,31 @@ impl SumcheckObject for Prodcheck {
             for i in 0..l {
                 let p_ptr = self.p_polys[i].as_shared_mut_ptr();
                 let q_ptr = self.q_polys[i].as_shared_mut_ptr();
+                let p_scratch_ptr = self.p_scratch[i].as_shared_mut_ptr();
+                let q_scratch_ptr = self.q_scratch[i].as_shared_mut_ptr();
                 (0..half).into_par_iter().map(|j| {
                     unsafe {
                         let p0 = *p_ptr.get_mut(2 * j);
                         let p1 = *p_ptr.get_mut(2 * j + 1);
                         let q0 = *q_ptr.get_mut(2 * j);
                         let q1 = *q_ptr.get_mut(2 * j + 1);
-                        *p_ptr.get_mut(j) = p0 + (p1 + p0) * challenge;
-                        *q_ptr.get_mut(j) = q0 + (q1 + q0) * challenge;
+                        *p_scratch_ptr.get_mut(j) = p0 + (p1 + p0) * challenge;
+                        *q_scratch_ptr.get_mut(j) = q0 + (q1 + q0) * challenge;
                     }
                 }).count();
-                self.p_polys[i].truncate(half);
-                self.q_polys[i].truncate(half);
+                std::mem::swap(&mut self.p_polys[i], &mut self.p_scratch[i]);
+                std::mem::swap(&mut self.q_polys[i], &mut self.q_scratch[i]);
             }
         }
 
+        self.active_len = half;
         self.cached_round_msg = None;
     }
 
     fn round_msg(&mut self) -> CompressedPoly {
 
-        assert!(self.p_polys[0].len() > 1, "The protocol has already ended.");
-        let half = self.p_polys[0].len() / 2;
+        assert!(self.active_len > 1, "The protocol has already ended.");
+        let half = self.active_len / 2;
 
         if self.cached_round_msg.is_some() {
             return self.cached_round_msg.as_ref().unwrap().clone()
@@ -229,7 +242,7 @@ mod tests {
             prover.bind(challenge);
         }
 
-        assert!(prover.p_polys[0].len() == 1);
+        assert!(prover.active_len == 1);
 
         let mut eq = vec![F128::zero(); 1 << prover.challenges.len()];
         let ev_p : Vec<_> = p_polys.iter().map(|p| evaluate(&p, &prover.challenges, &mut eq)).collect();

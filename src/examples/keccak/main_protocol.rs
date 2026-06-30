@@ -71,6 +71,7 @@ pub fn main_protocol() {
     let boolcheck_pow2 = 1 << (num_vars - c - 1);
     let boolcheck_pow3_adj = boolcheck_pow3 / 3 * 2;
     let boolcheck_ext = vec![F128::zero(); boolcheck_pow3 * boolcheck_pow2];
+    let boolcheck_ext_scratch = vec![F128::zero(); boolcheck_pow3 * boolcheck_pow2];
     let boolcheck_tables_ext : Vec<Vec<F128>> = (0..5).map(|_| vec![F128::zero(); boolcheck_pow3_adj * boolcheck_pow2]).collect();
     let boolcheck_eq_sequence = (0..num_vars).map(|i| vec![F128::zero(); 1 << i]).collect();
 
@@ -89,7 +90,7 @@ pub fn main_protocol() {
     println!(">>>> Initialization took: {} ms", (boolcheck_init - boolcheck_start).as_millis());
 
     let gamma = F128::rand(rng);
-    let mut prover = prover.folding_challenge(gamma, boolcheck_ext, boolcheck_tables_ext, boolcheck_eq_sequence);
+    let mut prover = prover.folding_challenge(gamma, boolcheck_ext, boolcheck_ext_scratch, boolcheck_tables_ext, boolcheck_eq_sequence);
 
     let boolcheck_extensions = Instant::now();
 

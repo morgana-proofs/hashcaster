@@ -103,7 +103,7 @@ impl<
     }
 
     /// Folding round. This is an initial message of the verifier.
-    pub fn folding_challenge(self, gamma: F128, ext: Vec<F128>, mut tables_ext: Vec<Vec<F128>>, eq_sequence: Vec<Vec<F128>>)
+    pub fn folding_challenge(self, gamma: F128, ext: Vec<F128>, ext_scratch: Vec<F128>, mut tables_ext: Vec<Vec<F128>>, eq_sequence: Vec<Vec<F128>>)
      -> BoolCheckSingle<
         N,
         impl FnPackageFolded<N>,
@@ -128,6 +128,7 @@ impl<
             c,
             evaluation_claim,
             ext,
+            ext_scratch,
             &mut tables_ext,
             eq_sequence,
         )
@@ -145,6 +146,8 @@ pub struct BoolCheckSingle<
 
     polys: [Vec<F128>; N], // Input polynomials.
     pub ext: Option<Vec<F128>>, // Extension of output on 3^{c+1} * 2^{n-c-1}, during first phase.
+    ext_scratch: Option<Vec<F128>>,
+    ext_len: usize,
     poly_coords: Option<Vec<F128>>,
     c: usize, // PHASE SWITCH, round < c => PHASE 1.
     pub claim: F128,
@@ -166,11 +169,12 @@ impl<
     const N: usize,
     F: FnPackageFolded<N>,
 > BoolCheckSingle<N, F> {
-    pub fn new(f: F, pt: Vec<F128>, polys: [Vec<F128>; N], c: usize, evaluation_claim: F128, mut ext: Vec<F128>, tables_ext: &mut [Vec<F128>], mut eq_sequence: Vec<Vec<F128>>) -> Self {
+    pub fn new(f: F, pt: Vec<F128>, polys: [Vec<F128>; N], c: usize, evaluation_claim: F128, mut ext: Vec<F128>, ext_scratch: Vec<F128>, tables_ext: &mut [Vec<F128>], mut eq_sequence: Vec<Vec<F128>>) -> Self {
         for poly in polys.iter() {
             assert!(poly.len() == 1 << pt.len());
         }
         assert!(c < pt.len());
+        assert!(ext_scratch.len() == ext.len());
 
         let (bit_mapping, trit_mapping) = compute_trit_mappings(c);
 
@@ -189,12 +193,15 @@ impl<
         };
 
         eq_poly_sequence(&pt[1..], &mut eq_sequence);
+        let ext_len = 3usize.pow((c + 1) as u32) * (1 << (pt.len() - c - 1));
     
         Self {
             f,
             pt,
             polys,
             ext : Some(ext),
+            ext_scratch: Some(ext_scratch),
+            ext_len,
             poly_coords : None,
             c,
             claim: evaluation_claim,
@@ -257,7 +264,8 @@ impl<
 
         if curr_phase_1 {
             let ext = self.ext.as_mut().unwrap();
-            let new_len = ext.len() / 3;
+            let ext_scratch = self.ext_scratch.as_mut().unwrap();
+            let new_len = self.ext_len / 3;
 
             #[cfg(not(feature = "parallel"))]
             {
@@ -265,23 +273,25 @@ impl<
                     let v0 = ext[3 * j];
                     let v1 = ext[3 * j + 1];
                     let v2 = ext[3 * j + 2];
-                    ext[j] = v0 + (v0 + v1 + v2) * t + v2 * t2;
+                    ext_scratch[j] = v0 + (v0 + v1 + v2) * t + v2 * t2;
                 }
             }
 
             #[cfg(feature = "parallel")]
             {
                 let ext_ptr = ext.as_shared_mut_ptr();
+                let ext_scratch_ptr = ext_scratch.as_shared_mut_ptr();
                 (0..new_len).into_par_iter().map(|j| {
                     unsafe {
                         let v0 = *ext_ptr.get_mut(3 * j);
                         let v1 = *ext_ptr.get_mut(3 * j + 1);
                         let v2 = *ext_ptr.get_mut(3 * j + 2);
-                        *ext_ptr.get_mut(j) = v0 + (v0 + v1 + v2) * t + v2 * t2;
+                        *ext_scratch_ptr.get_mut(j) = v0 + (v0 + v1 + v2) * t + v2 * t2;
                     }
                 }).count();
             }
-            ext.truncate(new_len);
+            std::mem::swap(self.ext.as_mut().unwrap(), self.ext_scratch.as_mut().unwrap());
+            self.ext_len = new_len;
         } else {
             //            let poly_coords = self.poly_coords.last().unwrap();
             let half = 1 << (num_vars - round - 1);
@@ -304,6 +314,7 @@ impl<
 
         if self.curr_round() == c + 1 { // Note that we are in the next round now.
             let _ = self.ext.take(); // it is useless now
+            let _ = self.ext_scratch.take();
             self.poly_coords = Some(restrict(
                 &(self.polys.iter().map(|x|x.as_slice()).collect::<Vec<_>>()),
                 &self.challenges,
@@ -575,9 +586,10 @@ mod tests {
         let pow2 = 1 << (num_vars - phase_switch - 1);
         let pow3_adj = pow3 / 3 * 2;
         let ext = vec![F128::zero(); pow3 * pow2];
+        let ext_scratch = vec![F128::zero(); pow3 * pow2];
         let tables_ext : Vec<Vec<F128>> = (0..2).map(|_| vec![F128::zero(); pow3_adj * pow2]).collect();
         let eq_sequence = (0..num_vars).map(|i| vec![F128::zero(); 1 << i]).collect();
-        let mut instance = instance.folding_challenge(gamma, ext, tables_ext, eq_sequence);
+        let mut instance = instance.folding_challenge(gamma, ext, ext_scratch, tables_ext, eq_sequence);
 
         let mut current_claim = evaluation_claim;
 
@@ -659,9 +671,10 @@ mod tests {
         let pow2 = 1 << (num_vars - phase_switch - 1);
         let pow3_adj = pow3 / 3 * 2;
         let ext = vec![F128::zero(); pow3 * pow2];
+        let ext_scratch = vec![F128::zero(); pow3 * pow2];
         let tables_ext : Vec<Vec<F128>> = (0..2).map(|_| vec![F128::zero(); pow3_adj * pow2]).collect();
         let eq_sequence = (0..num_vars).map(|i| vec![F128::zero(); 1 << i]).collect();
-        let mut instance = instance.folding_challenge(gamma, ext, tables_ext, eq_sequence);
+        let mut instance = instance.folding_challenge(gamma, ext, ext_scratch, tables_ext, eq_sequence);
 
         let mut current_claim = evaluation_claim;
 

@@ -229,9 +229,10 @@ mod tests {
         let pow2 = 1 << (num_vars - c - 1);
         let pow3_adj = pow3 / 3 * 2;
         let ext = vec![F128::zero(); pow3 * pow2];
+        let ext_scratch = vec![F128::zero(); pow3 * pow2];
         let tables_ext : Vec<Vec<F128>> = (0..5).map(|_| vec![F128::zero(); pow3_adj * pow2]).collect();
         let eq_sequence = (0..num_vars).map(|i| vec![F128::zero(); 1 << i]).collect();
-        let mut prover = prover.folding_challenge(gamma, ext, tables_ext, eq_sequence);
+        let mut prover = prover.folding_challenge(gamma, ext, ext_scratch, tables_ext, eq_sequence);
 
         // let ext_l = expected_ext[0].len();
         // let expected_ext = (0..ext_l).map(|i| {
