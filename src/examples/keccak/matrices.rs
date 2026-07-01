@@ -7,8 +7,9 @@
 // As we are actually acting on F128-elements, all our operations are 128-vectorized by default.
 
 use num_traits::Zero;
+use rayon::iter::{IndexedParallelIterator, IntoParallelIterator, ParallelIterator};
 
-use crate::{field::F128, protocols::lincheck::{Composition, IdentityMatrix, LinOp, MatrixSum}};
+use crate::{field::F128, protocols::lincheck::{Composition, IdentityMatrix, LinOp, MatrixSum}, ptr_utils::{AsSharedMutPtr, UnsafeIndexRawMut}};
 
 fn idx(x: usize, y: usize, z: usize) -> usize {
     x * 320 + y * 64 + z
@@ -296,7 +297,7 @@ impl LinOp for KeccakLinMatrix {
     }
 }
 
-pub fn keccak_linround_witness_into(input: [&[F128]; 5], output: &mut [Vec<F128>; 5], input_state: &mut [Vec<F128>; 3], output_state: &mut [Vec<F128>; 3]) {
+pub fn keccak_linround_witness_into(input: [&[F128]; 5], output: &mut [Vec<F128>; 5]) {
     let l = input[0].len();
     for i in 1..5 {
         assert!(input[i].len() == l);
@@ -304,38 +305,62 @@ pub fn keccak_linround_witness_into(input: [&[F128]; 5], output: &mut [Vec<F128>
     }
     assert!(output[0].len() == l);
     assert!(l % 1024 == 0);
-    for j in 0..3 {
-        assert!(input_state[j].len() == 1600);
-        assert!(output_state[j].len() == 1600);
-    }
-    
-    let m = KeccakLinMatrixUnbatched::new();
 
     let nbatches = l / 1024;
+    let output_ptrs : Vec<_> = output.iter_mut().map(|arr| arr.as_shared_mut_ptr()).collect();
 
-    for batch_index in 0 .. nbatches {
-        for i in 0..5 {
-            for j in 0..3 {
-                input_state[j][i * 320 .. (i + 1) * 320].copy_from_slice(
-                    &input[i][batch_index * 1024 + j * 320 .. batch_index * 1024 + (j + 1) * 320]
-                );
-            }
-            output[i][batch_index * 1024 + (3 * 320) .. (batch_index + 1) * 1024].fill(F128::zero());
-        }
+    #[cfg(not(feature = "parallel"))]
+    let iter = 0 .. nbatches;
 
-        for j in 0..3 {
-            output_state[j].fill(F128::zero());
-            m.apply(&input_state[j], &mut output_state[j]);
-        }
+    #[cfg(feature = "parallel")]
+    let iter = (0 .. nbatches).into_par_iter().with_min_len(8);
+
+    iter.for_each(|batch_index| {
+        let batch_offset = batch_index * 1024;
 
         for i in 0..5 {
-            for j in 0..3 {
-                output[i][batch_index * 1024 + j * 320 .. batch_index * 1024 + (j + 1) * 320].copy_from_slice(
-                    &output_state[j][i * 320 .. (i + 1) * 320]
-                );
+            for z in 960..1024 {
+                unsafe {
+                    *output_ptrs[i].get_mut(batch_offset + z) = F128::zero();
+                }
             }
         }
-    }
+
+        for plane in 0..3 {
+            let plane_offset = batch_offset + plane * 320;
+            let mut c = [[F128::zero(); 64]; 5];
+            let mut d = [[F128::zero(); 64]; 5];
+
+            for x in 0..5 {
+                for y in 0..5 {
+                    for z in 0..64 {
+                        c[x][z] += input[x][plane_offset + y * 64 + z];
+                    }
+                }
+            }
+
+            for x in 0..5 {
+                for z in 0..64 {
+                    d[x][z] = c[(x + 4) % 5][z] + c[(x + 1) % 5][(z + 63) % 64];
+                }
+            }
+
+            for x in 0..5 {
+                for y in 0..5 {
+                    let out_poly = y;
+                    let out_y = (2 * x + 3 * y) % 5;
+                    let rotation = ROTATIONS[x][y];
+                    for z in 0..64 {
+                        let value = input[x][plane_offset + y * 64 + z] + d[x][z];
+                        let out_z = (z + rotation) % 64;
+                        unsafe {
+                            *output_ptrs[out_poly].get_mut(plane_offset + out_y * 64 + out_z) = value;
+                        }
+                    }
+                }
+            }
+        }
+    });
 }
 
 #[cfg(test)]
@@ -391,12 +416,10 @@ mod tests {
 
         let polys_refs = polys.iter().map(|x| x.as_slice()).collect::<Vec<_>>().try_into().unwrap();
         let mut m_p : [Vec<F128>; 5] = (0..5).map(|_| vec![F128::zero(); 1 << num_vars]).collect::<Vec<_>>().try_into().unwrap();
-        let mut input_state : [Vec<F128>; 3] = (0..3).map(|_| vec![F128::zero(); 1600]).collect::<Vec<_>>().try_into().unwrap();
-        let mut output_state : [Vec<F128>; 3] = (0..3).map(|_| vec![F128::zero(); 1600]).collect::<Vec<_>>().try_into().unwrap();
 
         let label0 = Instant::now();
 
-        keccak_linround_witness_into(polys_refs, &mut m_p, &mut input_state, &mut output_state);
+        keccak_linround_witness_into(polys_refs, &mut m_p);
 
         let mut eq = vec![F128::zero(); 1 << pt.len()];
         let initial_claims : [_; 5] = (0..5).map(|i| evaluate(&m_p[i], &pt, &mut eq)).collect::<Vec<_>>().try_into().unwrap();

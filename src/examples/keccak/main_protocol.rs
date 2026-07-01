@@ -38,9 +38,6 @@ pub fn main_protocol() {
 
     let mut eq_scratch = vec![F128::zero(); 1 << pt.len()];
 
-    let mut lin_input_state : [Vec<F128>; 3] = (0..3).map(|_| vec![F128::zero(); 1600]).collect::<Vec<_>>().try_into().unwrap();
-    let mut lin_output_state : [Vec<F128>; 3] = (0..3).map(|_| vec![F128::zero(); 1600]).collect::<Vec<_>>().try_into().unwrap();
-
     let layer0 : [Vec<F128>; 5] = polys.try_into().unwrap();
     let polys_refs = layer0.iter().map(|x| x.as_slice()).collect::<Vec<_>>().try_into().unwrap();
     let mut layer1 : [Vec<F128>; 5] = (0..5).map(|_| vec![F128::zero(); 1 << num_vars]).collect::<Vec<_>>().try_into().unwrap();
@@ -87,7 +84,7 @@ pub fn main_protocol() {
 
     let wtns_start = Instant::now();
 
-    keccak_linround_witness_into(polys_refs, &mut layer1, &mut lin_input_state, &mut lin_output_state);
+    keccak_linround_witness_into(polys_refs, &mut layer1);
     chi_round_witness_into(&layer1, &mut layer2);
 
     let wtns_finish = Instant::now();
