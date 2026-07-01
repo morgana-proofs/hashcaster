@@ -378,7 +378,7 @@ impl<
             let _ = self.ext.take(); // it is useless now
             let _ = self.ext_scratch.take();
             restrict(
-                &(self.polys.iter().map(|x|x.as_slice()).collect::<Vec<_>>()),
+                self.polys,
                 &self.challenges,
                 num_vars,
                 &mut self.restrict_eq,

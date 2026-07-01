@@ -284,8 +284,7 @@ pub fn drop_top_bit(x: usize) -> (usize, usize) {
 
 //#[unroll::unroll_for_loops]
 /// Restricts all coordinates of all polynomials and writes them in one contiguous array.
-pub fn restrict(polys: &[&[F128]], coords: &[F128], dims: usize, eq: &mut [F128], eq_sums: &mut [F128], ret: &mut [F128]) {
-    let n = polys.len();
+pub fn restrict<const N: usize>(polys: &[Vec<F128>; N], coords: &[F128], dims: usize, eq: &mut [F128], eq_sums: &mut [F128], ret: &mut [F128]) {
     for poly in polys.iter() {
         assert!(poly.len() == 1 << dims);
     }
@@ -293,7 +292,7 @@ pub fn restrict(polys: &[&[F128]], coords: &[F128], dims: usize, eq: &mut [F128]
 
     let chunk_size = (1 << coords.len());
     let num_chunks = 1 << (dims - coords.len());
-    assert!(ret.len() == num_chunks * 128 * n);
+    assert!(ret.len() == num_chunks * 128 * N);
     assert!(eq.len() == 1 << coords.len());
     assert!(eq_sums.len() == 256 * eq.len() / 8);
 
@@ -315,7 +314,7 @@ pub fn restrict(polys: &[&[F128]], coords: &[F128], dims: usize, eq: &mut [F128]
     const TILE: usize = 8;
     let num_tiles = (num_chunks + TILE - 1) / TILE;
 
-    for q in 0..n {
+    for q in 0..N {
         #[cfg(not(feature = "parallel"))]
         let iter = (0..num_tiles).into_iter();
         #[cfg(feature = "parallel")]
