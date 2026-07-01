@@ -1,5 +1,5 @@
 use num_traits::{One, Zero};
-use rayon::iter::{IntoParallelIterator, ParallelIterator};
+use rayon::iter::{IndexedParallelIterator, IntoParallelIterator, ParallelIterator};
 
 use crate::{field::F128, protocols::boolcheck::FnPackage, ptr_utils::{AsSharedMutPtr, UnsafeIndexRawMut}};
 
@@ -121,9 +121,9 @@ pub fn chi_round_witness_into(polys: &[Vec<F128>; 5], ret: &mut [Vec<F128>; 5]) 
     let iter = (0..l);
 
     #[cfg(feature = "parallel")]
-    let iter = (0..l).into_par_iter();
+    let iter = (0..l).into_par_iter().with_min_len(2048);
 
-    iter.map(|i| {
+    iter.for_each(|i| {
         let tmp = chi_compressed([polys[0][i], polys[1][i], polys[2][i], polys[3][i], polys[4][i]]);
         unsafe{ 
             *ret_ptrs[0].get_mut(i) = tmp[0];
@@ -132,7 +132,7 @@ pub fn chi_round_witness_into(polys: &[Vec<F128>; 5], ret: &mut [Vec<F128>; 5]) 
             *ret_ptrs[3].get_mut(i) = tmp[3];
             *ret_ptrs[4].get_mut(i) = tmp[4];
         }
-    }).count();
+    });
 }
 
 #[cfg(test)]

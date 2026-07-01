@@ -217,7 +217,7 @@ pub fn extend_n_tables<
         #[cfg(not(feature = "parallel"))]
         let chunk_id_iter = (0..pow2);
         #[cfg(feature = "parallel")]
-        let chunk_id_iter = (0..pow2).into_par_iter();
+        let chunk_id_iter = (0..pow2).into_par_iter().with_min_len(64);
 
         chunk_id_iter.map(|chunk_id| {
             let mut args = [F128::zero(); N]; 
@@ -312,7 +312,7 @@ pub fn restrict(polys: &[&[F128]], coords: &[F128], dims: usize, eq: &mut [F128]
         #[cfg(not(feature = "parallel"))]
         let iter = (0..num_chunks).into_iter();   
         #[cfg(feature = "parallel")]
-        let iter = (0..num_chunks).into_par_iter(); 
+        let iter = (0..num_chunks).into_par_iter().with_min_len(32); 
         iter.map(|i| {
             let mut acc = [F128::zero(); 128];
             for j in 0 .. eq.len() / 16 { // Step by 16 
@@ -403,10 +403,12 @@ impl EfficientMatrix {
 
         #[cfg(not(feature = "parallel"))]
         let row_iter = cols.chunks(8);
+        #[cfg(not(feature = "parallel"))]
         let sums_iter = precomp.chunks_mut(256);
 
         #[cfg(feature = "parallel")]
         let row_iter = cols.par_chunks(8);
+        #[cfg(feature = "parallel")]
         let sums_iter = precomp.par_chunks_mut(256);
 
         row_iter.zip(sums_iter).map(|(cols, sums)| {

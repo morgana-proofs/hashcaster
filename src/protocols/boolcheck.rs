@@ -1,5 +1,5 @@
 use num_traits::{One, Zero};
-use rayon::{iter::{IntoParallelIterator, ParallelIterator}, slice::ParallelSliceMut};
+use rayon::{iter::{IndexedParallelIterator, IntoParallelIterator, ParallelIterator}, slice::ParallelSliceMut};
 
 use crate::{field::F128, protocols::utils::{compute_trit_mappings, eq_ev, extend_n_tables, restrict, twist_evals}, ptr_utils::{AsSharedMutPtr, UnsafeIndexRawMut}, traits::{CompressedPoly, SumcheckObject}};
 
@@ -329,14 +329,14 @@ impl<
             {
                 let ext_ptr = ext.as_shared_mut_ptr();
                 let ext_scratch_ptr = ext_scratch.as_shared_mut_ptr();
-                (0..new_len).into_par_iter().map(|j| {
+                (0..new_len).into_par_iter().with_min_len(2048).for_each(|j| {
                     unsafe {
                         let v0 = *ext_ptr.get_mut(3 * j);
                         let v1 = *ext_ptr.get_mut(3 * j + 1);
                         let v2 = *ext_ptr.get_mut(3 * j + 2);
                         *ext_scratch_ptr.get_mut(j) = v0 + (v0 + v1 + v2) * t + v2 * t2;
                     }
-                }).count();
+                });
             }
             std::mem::swap(self.ext.as_mut().unwrap(), self.ext_scratch.as_mut().unwrap());
             self.ext_len = new_len;
@@ -349,7 +349,7 @@ impl<
             #[cfg(not(feature = "parallel"))]
             let iter = poly_coords.chunks_mut(1 << (num_vars - c - 1));
             #[cfg(feature = "parallel")]
-            let iter = poly_coords.par_chunks_mut(1 << (num_vars - c - 1));
+            let iter = poly_coords.par_chunks_mut(1 << (num_vars - c - 1)).with_min_len(4);
  
             iter.map(|chunk| {
                 for j in 0..half {
@@ -419,7 +419,7 @@ impl<
    
             #[cfg(feature = "parallel")]
             let mut poly_deg_2 =
-            (0 .. tail_high_len).into_par_iter().map(|hi| {
+            (0 .. tail_high_len).into_par_iter().with_min_len(64).map(|hi| {
                 let mut pd2_part = [F128::zero(), F128::zero(), F128::zero()];
                 for lo in 0..tail_low_len {
                     let offset = 3 * (hi * pow3 + self.bits_to_trits_map[lo] as usize);
@@ -475,7 +475,7 @@ impl<
             let iter = (0..half).into_iter();
 
             #[cfg(feature = "parallel")]
-            let iter = (0..half).into_par_iter();
+            let iter = (0..half).into_par_iter().with_min_len(16);
 
             let iter = iter.map(|i| {
                 f_alg(poly_coords, i, 1 << (num_vars - c - 1)).map(|x| x * eq_evs[i])

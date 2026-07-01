@@ -1,5 +1,5 @@
 use num_traits::Zero;
-use rayon::iter::{ParallelIterator, IntoParallelIterator};
+use rayon::iter::{IndexedParallelIterator, ParallelIterator, IntoParallelIterator};
 
 use crate::{field::F128, ptr_utils::{AsSharedConstPtr, AsSharedMutPtr, UnsafeIndexRaw, UnsafeIndexRawMut}, traits::{CompressedPoly, SumcheckObject}, utils::log2_exact};
 
@@ -146,7 +146,7 @@ impl SumcheckObject for Prodcheck {
                 let p_scratch_ptrs : Vec<_> = self.p_scratch.iter_mut().map(|p| p.as_shared_mut_ptr()).collect();
                 let q_scratch_ptrs : Vec<_> = self.q_scratch.iter_mut().map(|q| q.as_shared_mut_ptr()).collect();
 
-                (0..next_half).into_par_iter().map(|j| {
+                (0..next_half).into_par_iter().with_min_len(1024).map(|j| {
                     let mut pq_zero = F128::zero();
                     let mut pq_one = F128::zero();
                     let mut pq_inf = F128::zero();
@@ -222,7 +222,7 @@ impl SumcheckObject for Prodcheck {
         let iter = (0 .. half).into_iter();
 
         #[cfg(feature = "parallel")]
-        let iter = (0 .. half).into_par_iter();
+        let iter = (0 .. half).into_par_iter().with_min_len(1024);
 
         let iter = 
         iter.map(|i|{

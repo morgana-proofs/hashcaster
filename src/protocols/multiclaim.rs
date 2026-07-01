@@ -10,7 +10,7 @@
 use std::iter::once;
 
 use num_traits::{One, Zero};
-use rayon::iter::{IntoParallelIterator, IntoParallelRefMutIterator, ParallelIterator};
+use rayon::iter::{IndexedParallelIterator, IntoParallelIterator, IntoParallelRefMutIterator, ParallelIterator};
 
 use crate::{field::F128, precompute::frobenius_table::FROBENIUS, protocols::utils::frobenius_inv_lc, ptr_utils::{AsSharedMutPtr, UnsafeIndexRawMut}, traits::{CompressedPoly, SumcheckObject}};
 
@@ -47,16 +47,16 @@ impl<'a, const N: usize> MulticlaimCheck<'a, N> {
         #[cfg(not(feature = "parallel"))]
         let iter = (0..l);
         #[cfg(feature = "parallel")]
-        let iter = (0..l).into_par_iter();
+        let iter = (0..l).into_par_iter().with_min_len(2048);
 
         let poly_ptr = poly.as_shared_mut_ptr();
-        iter.map(|i| {
+        iter.for_each(|i| {
             let mut p = polys[0][i]; 
             for j in 1..N {
                 p += polys[j][i] * gamma_pows[128 * j];
             }
             unsafe{ *poly_ptr.get_mut(i) = p; }
-        }).count();
+        });
 
         let openings : Vec<F128> = (0..128).map(|i|{
             let mut o = openings[i];
