@@ -295,18 +295,18 @@ pub fn restrict(polys: &[&[F128]], coords: &[F128], dims: usize, eq: &mut [F128]
     let num_chunks = 1 << (dims - coords.len());
     assert!(ret.len() == num_chunks * 128 * n);
     assert!(eq.len() == 1 << coords.len());
-    assert!(eq_sums.len() == 65536 * eq.len() / 16);
+    assert!(eq_sums.len() == 256 * eq.len() / 8);
 
     eq_poly(coords, eq);
 
     assert!(eq.len() % 16 == 0, "Technical condition for now.");
 
-    for i in 0..eq.len()/16 {
-        eq_sums[i * 65536] = F128::zero();
-        for j in 1usize..65536 {
-            let eq_idx = j.trailing_zeros() as usize;
-            let sum_idx = j ^ (1 << eq_idx);
-            eq_sums[i * 65536 + j] = eq[i * 16 + eq_idx] + eq_sums[i * 65536 + sum_idx];
+    for i in 0..eq.len()/8 {
+        eq_sums[i * 256] = F128::zero();
+        for j in 1..256 {
+            let (sum_idx, eq_idx) = drop_top_bit(j);
+            let tmp = eq[i * 8 + eq_idx] + eq_sums[i * 256 + sum_idx];
+            eq_sums[i * 256 + j] = tmp;
         }
     }
 
@@ -328,7 +328,8 @@ pub fn restrict(polys: &[&[F128]], coords: &[F128], dims: usize, eq: &mut [F128]
             for b in 0..len {
                 let i = start + b;
                 for j in 0 .. eq.len() / 16 { // Step by 16
-                    let sums = &eq_sums[j * 65536 .. (j + 1) * 65536];
+                    let v0 = &eq_sums[j * 512 .. j * 512 + 256];
+                    let v1 = &eq_sums[j * 512 + 256 .. j * 512 + 512];
                     let bytearr = cast_slice::<F128, [u8; 16]>(
                         &polys[q][i * chunk_size + j * 16 .. i * chunk_size + (j + 1) * 16]
                     );
@@ -344,7 +345,8 @@ pub fn restrict(polys: &[&[F128]], coords: &[F128], dims: usize, eq: &mut [F128]
 
                         for u in 0..8 {
                             let bits = v_movemask_epi8(t) as u16;
-                            acc[b][s*8 + 7 - u] += sums[bits as usize];
+                            acc[b][s*8 + 7 - u] += v0[(bits & 255) as usize];
+                            acc[b][s*8 + 7 - u] += v1[((bits >> 8) & 255) as usize];
                             t = v_slli_epi64::<1>(t);
                         }
                     }

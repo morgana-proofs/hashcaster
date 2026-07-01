@@ -57,7 +57,7 @@ pub fn main_protocol() {
     let boolcheck_tail_eq_high = vec![F128::zero(); (1 << ((num_vars + 1) / 2)).max(1 << (num_vars - c - 1))];
     let boolcheck_poly_coords = vec![F128::zero(); 5 * 128 * (1 << (num_vars - c - 1))];
     let boolcheck_restrict_eq = vec![F128::zero(); 1 << (c + 1)];
-    let boolcheck_restrict_eq_sums = vec![F128::zero(); 65536 * boolcheck_restrict_eq.len() / 16];
+    let boolcheck_restrict_eq_sums = vec![F128::zero(); 256 * boolcheck_restrict_eq.len() / 8];
     let boolcheck_pt = pt.clone();
     let mut boolcheck_rs = Vec::with_capacity(num_vars);
     let mut coord_evals = vec![F128::zero(); 128 * 5 + 1];

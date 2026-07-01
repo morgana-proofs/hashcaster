@@ -286,7 +286,7 @@ mod tests {
         let tail_eq_high = vec![F128::zero(); (1 << ((num_vars + 1) / 2)).max(1 << (num_vars - c - 1))];
         let poly_coords = vec![F128::zero(); 5 * 128 * (1 << (num_vars - c - 1))];
         let restrict_eq = vec![F128::zero(); 1 << (c + 1)];
-        let restrict_eq_sums = vec![F128::zero(); 65536 * restrict_eq.len() / 16];
+        let restrict_eq_sums = vec![F128::zero(); 256 * restrict_eq.len() / 8];
         let mut prover = prover.folding_challenge(gamma, ext, ext_scratch, tables_ext, tail_eq_low, tail_eq_high, poly_coords, restrict_eq, restrict_eq_sums);
 
         // let ext_l = expected_ext[0].len();
