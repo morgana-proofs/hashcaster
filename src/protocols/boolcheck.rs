@@ -220,7 +220,7 @@ impl<
         assert!(tail_eq_high.len() >= (1 << ((pt.len() + 1) / 2)).max(1 << (pt.len() - c - 1)));
         assert!(poly_coords.len() == N * 128 * (1 << (pt.len() - c - 1)));
         assert!(restrict_eq.len() == 1 << (c + 1));
-        assert!(restrict_eq_sums.len() == 256 * restrict_eq.len() / 8);
+        assert!(restrict_eq_sums.len() == 65536 * restrict_eq.len() / 16);
 
         let (bit_mapping, trit_mapping) = compute_trit_mappings(c);
 
@@ -685,7 +685,7 @@ mod tests {
         let tail_eq_high = vec![F128::zero(); (1 << ((num_vars + 1) / 2)).max(1 << (num_vars - phase_switch - 1))];
         let poly_coords = vec![F128::zero(); 2 * 128 * (1 << (num_vars - phase_switch - 1))];
         let restrict_eq = vec![F128::zero(); 1 << (phase_switch + 1)];
-        let restrict_eq_sums = vec![F128::zero(); 256 * restrict_eq.len() / 8];
+        let restrict_eq_sums = vec![F128::zero(); 65536 * restrict_eq.len() / 16];
         let mut instance = instance.folding_challenge(gamma, ext, ext_scratch, tables_ext, tail_eq_low, tail_eq_high, poly_coords, restrict_eq, restrict_eq_sums);
 
         let mut current_claim = evaluation_claim;
@@ -777,7 +777,7 @@ mod tests {
         let tail_eq_high = vec![F128::zero(); (1 << ((num_vars + 1) / 2)).max(1 << (num_vars - phase_switch - 1))];
         let poly_coords = vec![F128::zero(); 2 * 128 * (1 << (num_vars - phase_switch - 1))];
         let restrict_eq = vec![F128::zero(); 1 << (phase_switch + 1)];
-        let restrict_eq_sums = vec![F128::zero(); 256 * restrict_eq.len() / 8];
+        let restrict_eq_sums = vec![F128::zero(); 65536 * restrict_eq.len() / 16];
         let mut instance = instance.folding_challenge(gamma, ext, ext_scratch, tables_ext, tail_eq_low, tail_eq_high, poly_coords, restrict_eq, restrict_eq_sums);
 
         let mut current_claim = evaluation_claim;
