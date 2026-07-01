@@ -311,7 +311,7 @@ pub fn restrict<const N: usize>(polys: &[Vec<F128>; N], coords: &[F128], dims: u
 
     let ret_ptr = ret.as_shared_mut_ptr();
 
-    const TILE: usize = 8;
+    const TILE: usize = 16;
     let num_tiles = (num_chunks + TILE - 1) / TILE;
 
     for q in 0..N {
