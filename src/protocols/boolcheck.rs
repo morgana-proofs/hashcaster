@@ -502,6 +502,8 @@ impl<
             let q0 = poly_deg_2[0] * eq_y_multiplier;
             let qinf = poly_deg_2[1] * eq_y_multiplier;
             let eq_t0 = pt_r + F128::one();
+            // Gruen optimization is prover-local: compute q(0), q(inf), then
+            // recover q(1) from the current claim before sending the standard round polynomial.
             let q1 = (self.claim + eq_t0 * q0) * pt_r.inverse();
 
             let mut poly_deg_2 = [q0, q1, qinf];
