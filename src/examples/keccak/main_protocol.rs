@@ -15,6 +15,8 @@ use std::time::{Duration, Instant};
 use itertools::Itertools;
 use num_traits::{One, Zero};
 use rand::rngs::OsRng;
+#[cfg(feature = "parallel")]
+use rayon::iter::{IndexedParallelIterator, IntoParallelRefIterator, ParallelIterator};
 use crate::{examples::keccak::{chi_round::{chi_round_witness_into, ChiPackage}, matrices::{keccak_linround_witness_into, KeccakLinMatrix}}, field::F128, protocols::{boolcheck::{BoolCheck, BoolCheckOutput, FnPackage}, lincheck::{LinOp, Lincheck, LincheckOutput}, multiclaim::MulticlaimCheck, utils::{eq_ev, eq_poly, evaluate, evaluate_univar, untwist_evals}}, traits::SumcheckObject};
 
 #[test]
@@ -95,7 +97,15 @@ pub fn main_protocol() {
 
     println!(">>>> Witness gen took {} ms", (wtns_finish - wtns_start).as_millis());
 
-    let evaluation_claims : [F128; 5] = std::array::from_fn(|i| evaluate(&layer2[i], &pt, &mut eq_scratch));
+    eq_poly(&pt, &mut eq_scratch);
+    #[cfg(not(feature = "parallel"))]
+    let evaluation_claims : [F128; 5] = std::array::from_fn(|i| {
+        layer2[i].iter().zip_eq(eq_scratch.iter()).fold(F128::zero(), |acc, (x, y)| acc + *x * *y)
+    });
+    #[cfg(feature = "parallel")]
+    let evaluation_claims : [F128; 5] = std::array::from_fn(|i| {
+        layer2[i].par_iter().zip(eq_scratch.par_iter()).map(|(x, y)| *x * *y).reduce(||F128::zero(), |a, b| a + b)
+    });
 
     let evaluations_finish = Instant::now();
 
