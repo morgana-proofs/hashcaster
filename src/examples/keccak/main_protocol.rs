@@ -48,7 +48,11 @@ pub fn main_protocol() {
     let boolcheck_pow3_adj = boolcheck_pow3 / 3 * 2;
     let boolcheck_ext = vec![F128::zero(); boolcheck_pow3 * boolcheck_pow2];
     let boolcheck_ext_scratch = vec![F128::zero(); boolcheck_pow3 * boolcheck_pow2];
-    let boolcheck_tables_ext : Vec<Vec<F128>> = (0..5).map(|_| vec![F128::zero(); boolcheck_pow3_adj * boolcheck_pow2]).collect();
+    #[cfg(feature = "parallel")]
+    let boolcheck_table_ext_copies = rayon::current_num_threads();
+    #[cfg(not(feature = "parallel"))]
+    let boolcheck_table_ext_copies = 1;
+    let boolcheck_tables_ext : Vec<Vec<F128>> = (0..5 * boolcheck_table_ext_copies).map(|_| vec![F128::zero(); boolcheck_pow3_adj]).collect();
     let boolcheck_tail_eq_low = vec![F128::zero(); 1 << ((num_vars + 1) / 2)];
     let boolcheck_tail_eq_high = vec![F128::zero(); (1 << ((num_vars + 1) / 2)).max(1 << (num_vars - c - 1))];
     let boolcheck_poly_coords = vec![F128::zero(); 5 * 128 * (1 << (num_vars - c - 1))];

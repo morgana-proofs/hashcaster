@@ -196,9 +196,9 @@ pub fn extend_n_tables<
     assert!(pow3 < (1 << 15) as usize, "This is too large anyway ;)");
     let pow2 = 2usize.pow((dims - c - 1) as u32);
     assert!(ret.len() == pow3 * pow2);
-    assert!(tables_ext.len() == N);
+    assert!(tables_ext.len() % N == 0);
     for table_ext in tables_ext.iter() {
-        assert!(table_ext.len() == pow3_adj * pow2);
+        assert!(table_ext.len() == pow3_adj);
     }
 
     // And we don't have multizip, so I guess I'm gonna write it with raw accesses once again. shrug
@@ -223,8 +223,12 @@ pub fn extend_n_tables<
             let mut args = [F128::zero(); N]; 
 
             let global_tab_offset = chunk_id * (1 << (c+1));
-            let global_ext_offset = chunk_id * pow3_adj;
             let global_ret_offset = chunk_id * pow3;
+            #[cfg(not(feature = "parallel"))]
+            let scratch_offset = 0;
+            #[cfg(feature = "parallel")]
+            let scratch_offset = rayon::current_thread_index().unwrap() * N;
+            assert!(scratch_offset + N <= tables_ext.len());
 
             for j in 0..pow3_adj {
 //                println!("entry, j = {}", j);
@@ -232,19 +236,19 @@ pub fn extend_n_tables<
                 if offset % 2 == 0 {
                     for z in 0..N {
                         let table_z = *table_ptrs.get(z);
-                        let table_ext_z = *table_ext_ptrs.get_mut(z); 
+                        let table_ext_z = *table_ext_ptrs.get_mut(scratch_offset + z); 
                         let value = *table_z.get(global_tab_offset + (offset >> 1));
-                        *table_ext_z.get_mut(global_ext_offset + j) = value;
+                        *table_ext_z.get_mut(j) = value;
                         args[z] = value;
                     }
                     *ret_ptr.get_mut(global_ret_offset + j) = f_quad(args) + f_lin(args);
                 } else {
                     for z in 0..N {
-                        let table_ext_z = *(table_ext_ptrs.get(z));
+                        let table_ext_z = *(table_ext_ptrs.get(scratch_offset + z));
                         let value =
-                            (*table_ext_z.get(global_ext_offset + j - offset)) +
-                            (*table_ext_z.get(global_ext_offset + j - 2 * offset));
-                        *table_ext_z.get_mut(global_ext_offset + j) = value;
+                            (*table_ext_z.get(j - offset)) +
+                            (*table_ext_z.get(j - 2 * offset));
+                        *table_ext_z.get_mut(j) = value;
                         args[z] = value;
                     }
                     *ret_ptr.get_mut(global_ret_offset + j) = f_quad(args);
@@ -254,10 +258,10 @@ pub fn extend_n_tables<
             for j in pow3_adj..pow3 {
                 let offset = trit_mapping[j] as usize;
                 for z in 0..N {
-                    let table_ext_z = *(table_ext_ptrs.get_mut(z));
+                    let table_ext_z = *(table_ext_ptrs.get_mut(scratch_offset + z));
                     args[z] =
-                        (*table_ext_z.get(global_ext_offset + j - offset)) +
-                        (*table_ext_z.get(global_ext_offset + j - 2 * offset))
+                        (*table_ext_z.get(j - offset)) +
+                        (*table_ext_z.get(j - 2 * offset))
                     ;
                 }
                 *ret_ptr.get_mut(global_ret_offset + j) = f_quad(args);

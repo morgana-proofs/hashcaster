@@ -633,7 +633,11 @@ mod tests {
         let pow3_adj = pow3 / 3 * 2;
         let ext = vec![F128::zero(); pow3 * pow2];
         let ext_scratch = vec![F128::zero(); pow3 * pow2];
-        let tables_ext : Vec<Vec<F128>> = (0..2).map(|_| vec![F128::zero(); pow3_adj * pow2]).collect();
+        #[cfg(feature = "parallel")]
+        let table_ext_copies = rayon::current_num_threads();
+        #[cfg(not(feature = "parallel"))]
+        let table_ext_copies = 1;
+        let tables_ext : Vec<Vec<F128>> = (0..2 * table_ext_copies).map(|_| vec![F128::zero(); pow3_adj]).collect();
         let tail_eq_low = vec![F128::zero(); 1 << ((num_vars + 1) / 2)];
         let tail_eq_high = vec![F128::zero(); (1 << ((num_vars + 1) / 2)).max(1 << (num_vars - phase_switch - 1))];
         let poly_coords = vec![F128::zero(); 2 * 128 * (1 << (num_vars - phase_switch - 1))];
@@ -721,7 +725,11 @@ mod tests {
         let pow3_adj = pow3 / 3 * 2;
         let ext = vec![F128::zero(); pow3 * pow2];
         let ext_scratch = vec![F128::zero(); pow3 * pow2];
-        let tables_ext : Vec<Vec<F128>> = (0..2).map(|_| vec![F128::zero(); pow3_adj * pow2]).collect();
+        #[cfg(feature = "parallel")]
+        let table_ext_copies = rayon::current_num_threads();
+        #[cfg(not(feature = "parallel"))]
+        let table_ext_copies = 1;
+        let tables_ext : Vec<Vec<F128>> = (0..2 * table_ext_copies).map(|_| vec![F128::zero(); pow3_adj]).collect();
         let tail_eq_low = vec![F128::zero(); 1 << ((num_vars + 1) / 2)];
         let tail_eq_high = vec![F128::zero(); (1 << ((num_vars + 1) / 2)).max(1 << (num_vars - phase_switch - 1))];
         let poly_coords = vec![F128::zero(); 2 * 128 * (1 << (num_vars - phase_switch - 1))];
