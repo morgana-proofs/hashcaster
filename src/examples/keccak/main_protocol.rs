@@ -134,6 +134,7 @@ pub fn main_protocol() {
     boolcheck_rs.clear();
     let mut boolcheck_phase1_msg = Duration::ZERO;
     let mut boolcheck_phase1_bind = Duration::ZERO;
+    let mut boolcheck_phase_switch_bind = Duration::ZERO;
     let mut boolcheck_phase2_msg = Duration::ZERO;
     let mut boolcheck_phase2_bind = Duration::ZERO;
 
@@ -150,9 +151,12 @@ pub fn main_protocol() {
         let bind_end = Instant::now();
         boolcheck_rs.push(r);
 
-        if i <= c {
+        if i < c {
             boolcheck_phase1_msg += round_msg_end - round_msg_start;
             boolcheck_phase1_bind += bind_end - bind_start;
+        } else if i == c {
+            boolcheck_phase1_msg += round_msg_end - round_msg_start;
+            boolcheck_phase_switch_bind += bind_end - bind_start;
         } else {
             boolcheck_phase2_msg += round_msg_end - round_msg_start;
             boolcheck_phase2_bind += bind_end - bind_start;
@@ -166,7 +170,8 @@ pub fn main_protocol() {
     println!(">>>> Rounds took: {} ms", (boolcheck_final - boolcheck_extensions).as_millis());
     println!("    [rounds breakdown]");
     println!("      phase-1 round_msg:              {} ms", boolcheck_phase1_msg.as_millis());
-    println!("      phase-1 bind + transition:      {} ms", boolcheck_phase1_bind.as_millis());
+    println!("      phase-1 bind:                   {} ms", boolcheck_phase1_bind.as_millis());
+    println!("      phase-switch bind:              {} ms", boolcheck_phase_switch_bind.as_millis());
     println!("      phase-2 round_msg:              {} ms", boolcheck_phase2_msg.as_millis());
     println!("      phase-2 bind:                   {} ms", boolcheck_phase2_bind.as_millis());
 
