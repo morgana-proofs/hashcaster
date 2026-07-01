@@ -18,12 +18,15 @@ pub trait FnPackage<const N: usize, const M: usize> : Send + Sync {
     /// (2*start + 1), counting with offset. Then applies full formula twice - to the first
     /// array, and to the second array, and the quadratic part to the element-wise sum of these arrays.
     fn exec_alg(&self, data: &[F128], start: usize, offset: usize) -> [[F128; M]; 3];
+
+    fn exec_alg_0_inf(&self, data: &[F128], start: usize, offset: usize) -> [[F128; M]; 2];
 }
 
 pub trait FnPackageFolded<const N: usize> : Send + Sync {
     fn exec_lin_compressed(&self, arg: [F128; N]) -> F128;
     fn exec_quad_compressed(&self, arg: [F128; N]) -> F128;
     fn exec_alg(&self, data: &[F128], start: usize, offset: usize) -> [F128; 3];
+    fn exec_alg_0_inf(&self, data: &[F128], start: usize, offset: usize) -> [F128; 2];
 }
 
 /// This explicitly implements a folding closure.
@@ -68,6 +71,17 @@ impl<const N: usize, const M: usize, F: FnPackage<N, M>> FnPackageFolded<N> for 
         }
         acc
     }
+
+    fn exec_alg_0_inf(&self, data: &[F128], start: usize, offset: usize) -> [F128; 2] {
+        let tmp = self.f.exec_alg_0_inf(data, start, offset);
+        let mut acc = [F128::zero(); 2];
+        for i in 0..M {
+            acc[0] += tmp[0][i] * self.gammas[i];
+            acc[1] += tmp[1][i] * self.gammas[i];
+        }
+        acc
+    }
+
 }
 
 fn fill_eq_table(point: &[F128], out: &mut [F128]) {
@@ -469,7 +483,7 @@ impl<
 
             let poly_coords = self.poly_coords.as_ref().unwrap();
 
-            let f_alg = |data, start, offset| {self.f.exec_alg(data, start, offset)};
+            let offset = 1 << (num_vars - c - 1);
 
             #[cfg(not(feature = "parallel"))]
             let iter = (0..half).into_iter();
@@ -477,17 +491,20 @@ impl<
             #[cfg(feature = "parallel")]
             let iter = (0..half).into_par_iter().with_min_len(16);
 
-            let iter = iter.map(|i| {
-                f_alg(poly_coords, i, 1 << (num_vars - c - 1)).map(|x| x * eq_evs[i])
-            });
+            let iter = iter.map(|i| self.f.exec_alg_0_inf(poly_coords, i, offset).map(|x| x * eq_evs[i]));
 
             #[cfg(not(feature = "parallel"))]
-            let mut poly_deg_2 = iter.fold([F128::zero(), F128::zero(), F128::zero()], |[a,b,c], [d,e,f]| [a+d,b+e,c+f]);
+            let poly_deg_2 = iter.fold([F128::zero(), F128::zero()], |[a,b], [d,e]| [a+d,b+e]);
             #[cfg(feature = "parallel")]
-            let mut poly_deg_2 = iter.reduce(||[F128::zero(), F128::zero(), F128::zero()], |[a,b,c], [d,e,f]| [a+d,b+e,c+f]);
+            let poly_deg_2 = iter.reduce(||[F128::zero(), F128::zero()], |[a,b], [d,e]| [a+d,b+e]);
 
             let eq_y_multiplier = eq_ev(&self.challenges, &self.pt[..round]);
-            poly_deg_2.iter_mut().map(|c| *c *= eq_y_multiplier).count();
+            let q0 = poly_deg_2[0] * eq_y_multiplier;
+            let qinf = poly_deg_2[1] * eq_y_multiplier;
+            let eq_t0 = pt_r + F128::one();
+            let q1 = (self.claim + eq_t0 * q0) * pt_r.inverse();
+
+            let mut poly_deg_2 = [q0, q1, qinf];
 
             // Cast poly to coefficient form
 
@@ -554,6 +571,26 @@ mod tests {
         ret
     }
 
+    fn and_algebraic_0_inf(data: &[F128], mut idx_a: usize, offset: usize) -> [[F128; 1]; 2] {
+        idx_a *= 2;
+        let mut idx_b = idx_a + offset * 128;
+
+        let mut ret = [
+            [F128::basis(0) * data[idx_a] * data[idx_b]],
+            [F128::basis(0) * (data[idx_a] + data[idx_a + 1]) * (data[idx_b] + data[idx_b + 1])],
+        ];
+
+        for i in 1..128 {
+            idx_a += offset;
+            idx_b += offset;
+
+            ret[0][0] += F128::basis(i) * data[idx_a] * data[idx_b];
+            ret[1][0] += F128::basis(i) * (data[idx_a] + data[idx_a + 1]) * (data[idx_b] + data[idx_b + 1]);
+        }
+
+        ret
+    }
+
     pub struct AndPackage{}
 
     impl FnPackage<2, 1> for AndPackage {
@@ -567,6 +604,10 @@ mod tests {
     
         fn exec_alg(&self, data: &[F128], start: usize, offset: usize) -> [[F128; 1]; 3] {
             and_algebraic(data, start, offset)
+        }
+
+        fn exec_alg_0_inf(&self, data: &[F128], start: usize, offset: usize) -> [[F128; 1]; 2] {
+            and_algebraic_0_inf(data, start, offset)
         }
     }
 

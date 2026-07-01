@@ -10,7 +10,7 @@
 
 // In end-to-end example, the outputs must be wired into inputs (say, using rotation polynomial).
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use itertools::Itertools;
 use num_traits::{One, Zero};
@@ -132,15 +132,31 @@ pub fn main_protocol() {
     let mut claim = evaluate_univar(&evaluation_claims, gamma);
 
     boolcheck_rs.clear();
+    let mut boolcheck_phase1_msg = Duration::ZERO;
+    let mut boolcheck_phase1_bind = Duration::ZERO;
+    let mut boolcheck_phase2_msg = Duration::ZERO;
+    let mut boolcheck_phase2_bind = Duration::ZERO;
 
     for i in 0..num_vars {
+        let round_msg_start = Instant::now();
         let rpoly = prover.round_msg().coeffs(claim);
+        let round_msg_end = Instant::now();
 
         let r = F128::rand(rng);
         assert!(rpoly.len() == 4);
         claim = evaluate_univar(&rpoly, r);
+        let bind_start = Instant::now();
         prover.bind(r);
+        let bind_end = Instant::now();
         boolcheck_rs.push(r);
+
+        if i <= c {
+            boolcheck_phase1_msg += round_msg_end - round_msg_start;
+            boolcheck_phase1_bind += bind_end - bind_start;
+        } else {
+            boolcheck_phase2_msg += round_msg_end - round_msg_start;
+            boolcheck_phase2_bind += bind_end - bind_start;
+        }
     }
 
     let BoolCheckOutput { frob_evals, .. } = prover.finish();
@@ -148,6 +164,11 @@ pub fn main_protocol() {
     let boolcheck_final = Instant::now();
 
     println!(">>>> Rounds took: {} ms", (boolcheck_final - boolcheck_extensions).as_millis());
+    println!("    [rounds breakdown]");
+    println!("      phase-1 round_msg:              {} ms", boolcheck_phase1_msg.as_millis());
+    println!("      phase-1 bind + transition:      {} ms", boolcheck_phase1_bind.as_millis());
+    println!("      phase-2 round_msg:              {} ms", boolcheck_phase2_msg.as_millis());
+    println!("      phase-2 bind:                   {} ms", boolcheck_phase2_bind.as_millis());
 
     assert!(frob_evals.len() == 128 * 5);
 

@@ -58,6 +58,17 @@ impl F128 {
     pub fn cobasis(i: usize) -> Self {
         Self::from_raw(COBASIS[i])
     }
+
+    pub fn inverse(self) -> Self {
+        assert!(!self.is_zero());
+        let mut x = self;
+        let mut ret = F128::one();
+        for _ in 1..128 {
+            x *= x;
+            ret *= x;
+        }
+        ret
+    }
 }
 
 impl Zero for F128 {

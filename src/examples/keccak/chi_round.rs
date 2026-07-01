@@ -91,6 +91,49 @@ fn chi_algebraic(data: &[F128], mut idx_a: usize, offset: usize) -> [[F128; 5]; 
     ret
 }
 
+fn chi_algebraic_0_inf(data: &[F128], mut idx_a: usize, offset: usize) -> [[F128; 5]; 2] {
+    idx_a *= 2;
+    let mut idxs = [
+        idx_a,
+        idx_a + offset * 128,
+        idx_a + 2 * offset * 128,
+        idx_a + 3 * offset * 128,
+        idx_a + 4 * offset * 128
+    ];
+
+    let mut ret = [[F128::zero(); 5]; 2];
+
+    for i in 0..128 {
+        ret[0][0] += F128::basis(i) * (data[idxs[0]] + (F128::one() + data[idxs[1]]) * data[idxs[2]]);
+        ret[0][1] += F128::basis(i) * (data[idxs[1]] + (F128::one() + data[idxs[2]]) * data[idxs[3]]);
+        ret[0][2] += F128::basis(i) * (data[idxs[2]] + (F128::one() + data[idxs[3]]) * data[idxs[4]]);
+        ret[0][3] += F128::basis(i) * (data[idxs[3]] + (F128::one() + data[idxs[4]]) * data[idxs[0]]);
+        ret[0][4] += F128::basis(i) * (data[idxs[4]] + (F128::one() + data[idxs[0]]) * data[idxs[1]]);
+
+        ret[1][0] += F128::basis(i) * (
+            (data[idxs[1]] + data[idxs[1] + 1]) * (data[idxs[2]] + data[idxs[2] + 1])
+        );
+        ret[1][1] += F128::basis(i) * (
+            (data[idxs[2]] + data[idxs[2] + 1]) * (data[idxs[3]] + data[idxs[3] + 1])
+        );
+        ret[1][2] += F128::basis(i) * (
+            (data[idxs[3]] + data[idxs[3] + 1]) * (data[idxs[4]] + data[idxs[4] + 1])
+        );
+        ret[1][3] += F128::basis(i) * (
+            (data[idxs[4]] + data[idxs[4] + 1]) * (data[idxs[0]] + data[idxs[0] + 1])
+        );
+        ret[1][4] += F128::basis(i) * (
+            (data[idxs[0]] + data[idxs[0] + 1]) * (data[idxs[1]] + data[idxs[1] + 1])
+        );
+
+        for j in 0..5 {
+            idxs[j] += offset;
+        }
+    }
+
+    ret
+}
+
 pub struct ChiPackage {}
 
 impl FnPackage<5, 5> for ChiPackage {
@@ -104,6 +147,10 @@ impl FnPackage<5, 5> for ChiPackage {
 
     fn exec_alg(&self, data: &[F128], start: usize, offset: usize) -> [[F128; 5]; 3] {
         chi_algebraic(data, start, offset)
+    }
+
+    fn exec_alg_0_inf(&self, data: &[F128], start: usize, offset: usize) -> [[F128; 5]; 2] {
+        chi_algebraic_0_inf(data, start, offset)
     }
 }
 
