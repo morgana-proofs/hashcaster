@@ -81,6 +81,7 @@ pub unsafe fn v_movemask_epi8(x: [u8; 16]) -> i32 {
     _mm_movemask_epi8(transmute(x))
 }
 
+#[inline(always)]
 pub unsafe fn v_slli_epi64<const K: i32>(x: [u8; 16]) -> [u8; 16] {
     transmute(_mm_slli_epi64::<K>(transmute(x)))
 }
