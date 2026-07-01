@@ -312,41 +312,53 @@ pub fn restrict(polys: &[&[F128]], coords: &[F128], dims: usize, eq: &mut [F128]
 
     let ret_ptr = ret.as_shared_mut_ptr();
 
+    const TILE: usize = 8;
+    let num_tiles = (num_chunks + TILE - 1) / TILE;
+
     for q in 0..n {
         #[cfg(not(feature = "parallel"))]
-        let iter = (0..num_chunks).into_iter();   
+        let iter = (0..num_tiles).into_iter();
         #[cfg(feature = "parallel")]
-        let iter = (0..num_chunks).into_par_iter().with_min_len(32); 
-        iter.map(|i| {
-            let mut acc = [F128::zero(); 128];
-            for j in 0 .. eq.len() / 16 { // Step by 16 
-                let v0 = &eq_sums[j * 512 .. j * 512 + 256];
-                let v1 = &eq_sums[j * 512 + 256 .. j * 512 + 512];
-                let bytearr = cast_slice::<F128, [u8; 16]>(
-                    &polys[q][i * chunk_size + j * 16 .. i * chunk_size + (j + 1) * 16]
-                );
+        let iter = (0..num_tiles).into_par_iter().with_min_len(4);
+        iter.map(|tile| {
+            let start = tile * TILE;
+            let len = (num_chunks - start).min(TILE);
+            let mut acc = [[F128::zero(); 128]; TILE];
 
-                // Iteration over bytes
-                for s in 0..16 {
-                    let mut t = [
-                        bytearr[0][s], bytearr[1][s], bytearr[2][s], bytearr[3][s],
-                        bytearr[4][s], bytearr[5][s], bytearr[6][s], bytearr[7][s],
-                        bytearr[8][s], bytearr[9][s], bytearr[10][s], bytearr[11][s],
-                        bytearr[12][s], bytearr[13][s], bytearr[14][s], bytearr[15][s],
-                    ];
-    
-                    for u in 0..8 {
-                        let bits = v_movemask_epi8(t) as u16;
-                        acc[s*8 + 7 - u] += v0[(bits & 255) as usize];
-                        acc[s*8 + 7 - u] += v1[((bits >> 8) & 255) as usize];
-                        t = v_slli_epi64::<1>(t);
+            for b in 0..len {
+                let i = start + b;
+                for j in 0 .. eq.len() / 16 { // Step by 16
+                    let v0 = &eq_sums[j * 512 .. j * 512 + 256];
+                    let v1 = &eq_sums[j * 512 + 256 .. j * 512 + 512];
+                    let bytearr = cast_slice::<F128, [u8; 16]>(
+                        &polys[q][i * chunk_size + j * 16 .. i * chunk_size + (j + 1) * 16]
+                    );
+
+                    // Iteration over bytes
+                    for s in 0..16 {
+                        let mut t = [
+                            bytearr[0][s], bytearr[1][s], bytearr[2][s], bytearr[3][s],
+                            bytearr[4][s], bytearr[5][s], bytearr[6][s], bytearr[7][s],
+                            bytearr[8][s], bytearr[9][s], bytearr[10][s], bytearr[11][s],
+                            bytearr[12][s], bytearr[13][s], bytearr[14][s], bytearr[15][s],
+                        ];
+
+                        for u in 0..8 {
+                            let bits = v_movemask_epi8(t) as u16;
+                            acc[b][s*8 + 7 - u] += v0[(bits & 255) as usize];
+                            acc[b][s*8 + 7 - u] += v1[((bits >> 8) & 255) as usize];
+                            t = v_slli_epi64::<1>(t);
+                        }
                     }
                 }
-
             }
+
             unsafe {
                 for coord in 0..128 {
-                    *ret_ptr.get_mut((coord + q * 128) * num_chunks + i) = acc[coord];
+                    let out = (coord + q * 128) * num_chunks + start;
+                    for b in 0..len {
+                        *ret_ptr.get_mut(out + b) = acc[b][coord];
+                    }
                 }
             }
         }
