@@ -11,18 +11,22 @@ pub struct F128 {
 }
 
 impl F128 {
+    #[inline(always)]
     pub fn new(x: bool) -> Self {
         if x {Self::one()} else {Self::zero()}
     }
 
+    #[inline(always)]
     pub fn from_raw(raw: u128) -> Self {
         Self{raw}
     }
 
+    #[inline(always)]
     pub fn raw(&self) -> u128 {
         self.raw
     }
 
+    #[inline(always)]
     pub fn into_raw(self) -> u128 {
         self.raw
     }
@@ -50,15 +54,18 @@ impl F128 {
         F128::from_raw(ret)
     }
 
+    #[inline(always)]
     pub fn basis(i: usize) -> Self {
         assert!(i < 128);
         Self::from_raw(1 << i)
     }
 
+    #[inline(always)]
     pub fn cobasis(i: usize) -> Self {
         Self::from_raw(COBASIS[i])
     }
 
+    #[inline(always)]
     pub fn inverse(self) -> Self {
         assert!(!self.is_zero());
         let mut x = self;
@@ -72,16 +79,19 @@ impl F128 {
 }
 
 impl Zero for F128 {
+    #[inline(always)]
     fn zero() -> Self {
         Self{raw: 0}
     }
 
+    #[inline(always)]
     fn is_zero(&self) -> bool {
         self.raw == 0
     }
 }
 
 impl One for F128 {
+    #[inline(always)]
     fn one() -> Self {
         Self{raw: 257870231182273679343338569694386847745}
     }
@@ -90,6 +100,7 @@ impl One for F128 {
 impl Add<F128> for F128 {
     type Output = F128;
 
+    #[inline(always)]
     fn add(self, rhs: Self) -> Self::Output {
         Self{raw: self.into_raw() ^ rhs.into_raw()}
     }
@@ -98,6 +109,7 @@ impl Add<F128> for F128 {
 impl Add<&F128> for F128 {
     type Output = F128;
 
+    #[inline(always)]
     fn add(self, rhs: &F128) -> Self::Output {
         Self{raw: self.into_raw() ^ rhs.raw()}
     }
@@ -105,7 +117,8 @@ impl Add<&F128> for F128 {
 
 impl BitAnd<F128> for F128 {
     type Output = F128;
-    
+
+    #[inline(always)]
     fn bitand(self, rhs: F128) -> Self::Output {
         Self{raw: self.into_raw() & rhs.into_raw()}
     }
@@ -113,31 +126,36 @@ impl BitAnd<F128> for F128 {
 
 impl BitAnd<&F128> for F128 {
     type Output = F128;
-    
+
+    #[inline(always)]
     fn bitand(self, rhs: &F128) -> Self::Output {
         Self{raw: self.into_raw() & rhs.raw()}
     }
 }
 
 impl AddAssign<F128> for F128 {
+    #[inline(always)]
     fn add_assign(&mut self, rhs: F128) {
         self.raw ^= rhs.into_raw()
     }
 }
 
 impl AddAssign<&F128> for F128 {
+    #[inline(always)]
     fn add_assign(&mut self, rhs: &F128) {
         self.raw ^= rhs.raw()
     }
 }
 
 impl BitAndAssign<F128> for F128 {
+    #[inline(always)]
     fn bitand_assign(&mut self, rhs: F128) {
         self.raw &= rhs.into_raw();
     }
 }
 
 impl BitAndAssign<&F128> for F128 {
+    #[inline(always)]
     fn bitand_assign(&mut self, rhs: &F128) {
         self.raw &= rhs.raw();
     }
@@ -146,6 +164,7 @@ impl BitAndAssign<&F128> for F128 {
 impl Mul<F128> for F128 {
     type Output = F128;
 
+    #[inline(always)]
     fn mul(self, rhs: F128) -> Self::Output {
         Self::from_raw(mul_128(self.raw, rhs.raw))
     }
@@ -154,18 +173,21 @@ impl Mul<F128> for F128 {
 impl Mul<&F128> for F128 {
     type Output = F128;
 
+    #[inline(always)]
     fn mul(self, rhs: &F128) -> Self::Output {
         Self::from_raw(mul_128(self.into_raw(), rhs.raw()))
     }
 }
 
 impl MulAssign<F128> for F128 {
+    #[inline(always)]
     fn mul_assign(&mut self, rhs: F128) {
         *self = *self * rhs;
     }
 }
 
 impl MulAssign<&F128> for F128 {
+    #[inline(always)]
     fn mul_assign(&mut self, rhs: &F128) {
         *self = *self * rhs;
     }
