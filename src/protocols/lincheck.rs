@@ -2,7 +2,7 @@ use std::time::Instant;
 
 use num_traits::{One, Zero};
 use rayon::iter::{IndexedParallelIterator, IntoParallelRefIterator, IntoParallelRefMutIterator, ParallelIterator};
-use rayon::slice::ParallelSlice;
+use rayon::slice::{ParallelSlice, ParallelSliceMut};
 
 use crate::protocols::utils::{evaluate, evaluate_univar};
 use crate::traits::{CompressedPoly, SumcheckObject};
@@ -168,11 +168,30 @@ impl<'a, const N: usize, const M: usize, L: LinOp> Lincheck<'a, N, M, L> {
         }
         
 
-        self.polys.iter().enumerate().map(|(i, poly)| {
-            let poly_chunks = poly.chunks(chunk_size);
-            poly_chunks.enumerate().map(|(j, chunk)| {
-                p_polys[i].iter_mut().zip(chunk.iter()).map(|(p, c)| *p += eq_dormant[j] * c).count();
-        }).count()}).count();
+        #[cfg(not(feature = "parallel"))]
+        {
+            self.polys.iter().enumerate().map(|(i, poly)| {
+                let poly_chunks = poly.chunks(chunk_size);
+                poly_chunks.enumerate().map(|(j, chunk)| {
+                    p_polys[i].iter_mut().zip(chunk.iter()).map(|(p, c)| *p += eq_dormant[j] * c).count();
+            }).count()}).count();
+        }
+
+        #[cfg(feature = "parallel")]
+        {
+            const BLOCK: usize = 64;
+            self.polys.iter().enumerate().map(|(i, poly)| {
+                p_polys[i].par_chunks_mut(BLOCK).enumerate().map(|(block_idx, p_block)| {
+                    let start = block_idx * BLOCK;
+                    for (j, eq) in eq_dormant.iter().enumerate() {
+                        let chunk = &poly[j * chunk_size + start .. j * chunk_size + start + p_block.len()];
+                        for k in 0..p_block.len() {
+                            p_block[k] += *eq * chunk[k];
+                        }
+                    }
+                }).count();
+            }).count();
+        }
 
         let mut gamma_pows = Vec::with_capacity(M);
         let mut tmp = F128::one();
